@@ -1,16 +1,70 @@
 [project]
 name = "queens"
 version = "0.1.0"
-description = "Add your description here"
+description = "LinkedIn Queens board puzzle generator — create valid N×N boards with coloured regions"
 readme = "README.md"
 authors = [
     { name = "oscar-almashoor", email = "oscar.almashoor@auroraer.com" }
 ]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "networkx>=3.6.1",
+    "numpy>=2.4.4",
+    "typer>=0.25.1",
+]
 
 [project.scripts]
-queens = "queens:main"
+queens = "queens.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.15.12",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "A002",     # builtin-argument-shadowing (format is a legit CLI arg name)
+    "BLE001",   # blind-except (acceptable in benchmark code)
+    "C901",     # too-complex (backtracking solvers are inherently complex)
+    "COM812",   # missing-trailing-comma (handled by formatter)
+    "D101",     # missing-docstring-in-public-class (test classes are self-documenting)
+    "D102",     # undocumented-public-method (Protocol methods are self-documenting)
+    "D104",     # missing-docstring-in-public-package (empty __init__.py is fine)
+    "D105",     # undocumented-magic-method (__post_init__ is just validation)
+    "D203",     # one-blank-line-before-class (conflicts with D211)
+    "D212",     # multi-line-summary-first-line (conflicts with D211)
+    "D213",     # multi-line-summary-second-line
+    "EM102",    # f-string-in-exception (fine for CLI-facing errors)
+    "PLR0912",  # too-many-branches (inherent in deduction rules)
+    "PLR0913",  # too-many-arguments (generator functions need many params)
+    "PLR0915",  # too-many-statements (backtracking solvers are long)
+    "PLR2004",  # magic-value-comparison (layer numbers, N values are inherently meaningful)
+    "RUF001",   # ambiguous-unicode-character-string (× is intentional)
+    "RUF002",   # ambiguous-unicode-character-docstring (× is intentional)
+    "S101",     # assert (used for internal invariants)
+    "S311",     # suspicious-non-cryptographic-random-usage (not crypto)
+    "SIM102",   # collapsible-if (sometimes clearer nested)
+    "SIM110",   # reimplemented-builtin (any() is less readable in some contexts)
+    "TCH",      # typing-only-import blocks (handled by ruff's auto-fixes)
+    "TRY003",   # long-error-message (fine for this project)
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pyrefly]
+# Pyrefly type checker configuration
+python-version = "3.14"
 
 [build-system]
 requires = ["uv_build>=0.8.24,<0.9.0"]
