@@ -27,6 +27,21 @@ No database or external services needed for MVP — everything is in-memory comp
 
 ---
 
+## Code Style & Conventions
+
+| Aspect | Rule |
+|---|---|
+| Formatter/linter | **ruff** (rules: `ALL` — no exceptions) |
+| Type checker | **Pyrefly** (enable via `[tool.pyrefly]` in `pyproject.toml`) |
+| Type annotations | **Always — every function signature, every public attribute.** No `Any`. |
+| Inheritance | **None.** Prefer `Protocol` for structural subtyping; compose with functions instead. |
+| Mutability | **Frozen `dataclass`** or typed dicts. No mutable objects passed around. |
+| Side effects | **On the outside.** Pure functions core; IO in thin CLI/test harness layer. |
+
+> **TL;DR**: Write everything as typed, pure functions over frozen data. Use `Protocol` where you need polymorphism. No `class Foo(Bar)`, no `Any`, no `None` as a default sentinel.
+
+---
+
 ## Core Architecture
 
 ```
@@ -101,7 +116,7 @@ def generate_placement(n: int, rng: Random) -> list[tuple[int, int]]:
 
 For N ≤ 15 this takes < 1ms. The random shuffle ensures diverse placements.
 
-**Extensibility**: `PlacementStrategy` is an ABC with a single method `generate(n, rng) -> Placement`. Variants could enforce specific patterns (e.g., all queens on main diagonal, balanced spacing for harder boards, etc.).
+**Extensibility**: Define a `PlacementStrategy` `Protocol` with `generate(n, rng) -> Placement`. Variants are free functions that satisfy the protocol (e.g., all queens on main diagonal, balanced spacing for harder boards, etc.).
 
 ---
 
@@ -137,10 +152,10 @@ This guarantees:
 
 **Key challenge**: Random BFS regions often allow **alternative queen placements**. The Uniqueness Verifier (step 3) catches these.
 
-**Extensibility**: `RegionBuilder` ABC. Variants:
-- `RandomBFSBuilder` — fast, high retry rate (~30-50% unique for N=8)
-- `ConstraintGuidedBuilder` — uses solver feedback to avoid multi-solution boards (future)
-- `TemplateBuilder` — grows regions from predefined templates for specific difficulty profiles
+**Extensibility**: `RegionBuilder` `Protocol`. Variants:
+- `random_bfs_build` — fast, high retry rate (~30-50% unique for N=8)
+- `constraint_guided_build` — uses solver feedback to avoid multi-solution boards (future)
+- `template_build` — grows regions from predefined templates for specific difficulty profiles
 
 ---
 
@@ -176,7 +191,7 @@ def count_solutions(board: Board, limit: int = 2) -> int:
 **Optimisation**: Use Python's `int` bitmasks for rows/cols (since N ≤ 20, a 64-bit int suffices). This makes elimination O(1) per cell via bitwise operations.
 
 **Extensibility**: 
-- `Solver` ABC with methods: `count_solutions()`, `find_all_solutions()`, `solve_stepwise()` (for difficulty analysis)
+- `Solver` `Protocol` with methods: `count_solutions()`, `find_all_solutions()`, `solve_stepwise()` (for difficulty analysis)
 - Could swap in a Rust/PyO3 solver later for N > 20
 
 ---
@@ -218,50 +233,46 @@ def assess_difficulty(board: Board) -> DifficultyReport:
 
 ---
 
-### 5. Board Generator Orchestrator (`generator.py`)
+### 5. Board Generator (`generator.py`)
+
+A single pure function with all configuration passed explicitly as frozen dataclasses (no class with mutable state):
 
 ```python
-class BoardGenerator:
-    def __init__(
-        self,
-        placement_strategy: PlacementStrategy,
-        region_builder: RegionBuilder,
-        solver: Solver,
-        difficulty_analyzer: DifficultyAnalyzer,
-        max_attempts: int = 1000,
-    ):
-        ...
-    
-    def generate(
-        self, 
-        n: int, 
-        target_difficulty: Difficulty | None = None,
-        seed: int | None = None,
-    ) -> Board:
-        """Generate a valid N×N Queens board."""
-        rng = Random(seed)
-        for attempt in range(self.max_attempts):
-            # 1. Place queens
-            placement = self.placement_strategy.generate(n, rng)
-            
-            # 2. Build regions
-            board = self.region_builder.build(n, placement, rng)
-            
-            # 3. Verify uniqueness
-            solutions = self.solver.count_solutions(board, limit=2)
-            if solutions != 1:
-                continue
-            
-            # 4. Assess difficulty
-            report = self.difficulty_analyzer.assess(board)
-            
-            # 5. Check difficulty target
-            if target_difficulty and report.score < target_difficulty:
-                continue
-            
-            return board
+def generate_board(
+    n: int,
+    *,
+    place_func: PlacementStrategy,
+    region_func: RegionBuilder,
+    solver: Solver,
+    difficulty_fn: DifficultyAnalyzer,
+    target_difficulty: Difficulty | None = None,
+    max_attempts: int = 1000,
+    seed: int | None = None,
+) -> Board:
+    """Generate a valid N×N Queens board."""
+    rng = Random(seed)
+    for attempt in range(max_attempts):
+        # 1. Place queens
+        placement = place_func(n, rng)
         
-        raise GenerationError(f"Failed after {self.max_attempts} attempts")
+        # 2. Build regions
+        board = region_func(n, placement, rng)
+        
+        # 3. Verify uniqueness
+        solutions = solver.count_solutions(board, limit=2)
+        if solutions != 1:
+            continue
+        
+        # 4. Assess difficulty
+        report = difficulty_fn(board)
+        
+        # 5. Check difficulty target
+        if target_difficulty is not None and report.score < target_difficulty:
+            continue
+        
+        return board
+    
+    raise GenerationError(f"Failed after {max_attempts} attempts")
 ```
 
 **Retry economics**: For N=8 with naive BFS regions, roughly 30-50% of boards are unique. So 2-3 attempts on average. With a difficulty filter, more attempts may be needed, but still well under 100 for most N.
@@ -356,18 +367,18 @@ queens/
 
 ## Extensibility Points
 
-All major components use the Strategy pattern (ABCs):
+All major components use structural subtyping (`Protocol` — no inheritance):
 
-| Component | ABC | Variant examples |
+| Component | Protocol | Variant examples |
 |---|---|---|
-| Queen placement | `PlacementStrategy` | `BacktrackingPlacement`, `TemplatePlacement`, `AdversarialPlacement` |
-| Region building | `RegionBuilder` | `RandomBFSBuilder`, `ConstraintGuidedBuilder`, `TemplateBuilder` |
+| Queen placement | `PlacementStrategy` | `backtracking_placement`, `template_placement`, `adversarial_placement` |
+| Region building | `RegionBuilder` | `random_bfs_build`, `constraint_guided_build`, `template_build` |
 | Solving | `Solver` | `BacktrackingSolver`, `StepwiseSolver` (for difficulty), `RustSolver` (future) |
-| Difficulty | `DifficultyAnalyzer` | `LayeredAnalyzer`, `CustomRuleAnalyzer` |
+| Difficulty | `DifficultyAnalyzer` | `layered_analyze`, `custom_rule_analyze` |
 
 Game variants (different constraints) can be supported by:
-- Subclassing `Solver` with modified constraints (e.g., different adjacency rules, extra regions)
-- Subclassing `PlacementStrategy` for different queen placement rules
+- Writing a new solver function satisfying the `Solver` Protocol with modified constraints (e.g., different adjacency rules, extra regions)
+- Writing a new placement function satisfying the `PlacementStrategy` Protocol
 - The `Board` dataclass can be extended with variant-specific metadata
 
 ---
