@@ -73,18 +73,15 @@ def _compute_class(score: float) -> str:
 
 def _compute_score(
     n: int,
-    deduction_placed: int,
+    phase1_placed: int,
     max_hypo_depth: int,
     hypotheses_tested: int,
     cells_eliminated: int,
     technique_counts: dict[str, int],
 ) -> float:
     """Compute continuous difficulty score from analysis results."""
-    deduction_gap = 1.0 - deduction_placed / n
-
-    if deduction_gap == 0:
-        # Deduction solves the board — score based on technique complexity.
-        # Each technique carries a weight; more sophisticated techniques = higher score.
+    if phase1_placed == n:
+        # Pure deduction solved it — score based on technique complexity.
         weights = {
             "forced_singleton": 0.1,
             "region_line_lock": 0.3,
@@ -94,12 +91,12 @@ def _compute_score(
         complexity = sum(weights.get(t, 0.1) * c for t, c in technique_counts.items())
         return round(min(complexity / n, 0.99), 2)
 
+    # Board required hypotheticals to make progress
+    deduction_gap = 1.0 - phase1_placed / n
     elimination_yield = cells_eliminated / max(hypotheses_tested, 1)
 
-    # Base: higher gap = harder
     score = deduction_gap * 10
 
-    # Hypo depth factor
     if max_hypo_depth == 0:
         score *= 0.5
     elif max_hypo_depth == 1:
@@ -109,7 +106,6 @@ def _compute_score(
     else:
         score *= 2.0
 
-    # Resistance factor: low yield = board resists even hypotheticals
     score *= 2.0 - elimination_yield
 
     return round(score, 2)
@@ -524,13 +520,14 @@ def exhaustive_analyze(board: Board, max_hypo_depth: int = 3) -> DifficultyRepor
 
     # Phase 1: deduction to exhaustion
     state.run_full_deduction()
+    phase1_placed = state.queens_count
 
-    if state.queens_count == n:
-        score = _compute_score(n, state.queens_count, 0, 0, 0, state.technique_counts)
+    if phase1_placed == n:
+        score = _compute_score(n, phase1_placed, 0, 0, 0, state.technique_counts)
         return DifficultyReport(
             score=score,
             difficulty_class=_compute_class(score),
-            deduction_placed=n,
+            deduction_placed=phase1_placed,
             deduction_total=n,
             max_hypo_depth=0,
             hypotheses_tested=0,
@@ -566,7 +563,7 @@ def exhaustive_analyze(board: Board, max_hypo_depth: int = 3) -> DifficultyRepor
 
     score = _compute_score(
         n,
-        state.queens_count,
+        phase1_placed,
         effective_depth,
         total_tested,
         total_eliminated,
@@ -576,7 +573,7 @@ def exhaustive_analyze(board: Board, max_hypo_depth: int = 3) -> DifficultyRepor
     return DifficultyReport(
         score=round(score, 2),
         difficulty_class=_compute_class(score),
-        deduction_placed=state.queens_count,
+        deduction_placed=phase1_placed,
         deduction_total=n,
         max_hypo_depth=effective_depth,
         hypotheses_tested=total_tested,
