@@ -218,6 +218,93 @@ def share(
         httpd.shutdown()
 
 
+@app.command()
+def pages(
+    size: Annotated[int, typer.Option("--size", "-n", help="Board size (N×N)")] = 8,
+    difficulty: Annotated[
+        str | None,
+        typer.Option(
+            "--difficulty",
+            "-d",
+            help="Target difficulty: trivial, easy, medium, hard, expert, master",
+        ),
+    ] = None,
+    seed: Annotated[int | None, typer.Option("--seed", "-s")] = None,
+    open_browser: Annotated[
+        bool, typer.Option("--open/--no-open", help="Open the page in browser for preview")
+    ] = False,
+) -> None:
+    """Generate a puzzle page for GitHub Pages hosting.
+
+    Writes docs/index.html with the puzzle embedded. Commit and push
+    to serve it at https://<user>.github.io/<repo>/.
+
+    Only one puzzle is hosted at a time — each run overwrites the
+    previous page.
+    """
+    diff_map: dict[str, float] = {
+        "trivial": 0.0,
+        "easy": 1.0,
+        "medium": 2.0,
+        "hard": 4.0,
+        "expert": 7.0,
+        "master": 10.0,
+    }
+    target = diff_map.get(difficulty.lower()) if difficulty else None
+    if difficulty and target is None:
+        valid = ", ".join(diff_map)
+        typer.echo(f"Invalid difficulty. Choose from: {valid}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"Generating {size}×{size} board...", err=True)
+    board = generate_board(
+        size,
+        target_difficulty=target,
+        seed=seed,
+    )
+
+    # Encode board as URL hash
+    regions_list = board.regions.tolist()
+    encoded = encode_board(size, regions_list)
+
+    # Read play.html template
+    serve_dir = Path(__file__).resolve().parent
+    play_html_path = serve_dir / "play.html"
+    if not play_html_path.exists():
+        typer.echo(f"Error: play.html not found at {serve_dir}", err=True)
+        raise typer.Exit(1)
+
+    template = play_html_path.read_text()
+
+    # Inject the puzzle hash before the closing </script> tag (the last one)
+    # Find the position of the main <script> block
+    inject_marker = "<script>"
+    script_start = template.index(inject_marker) + len(inject_marker)
+    hash_script = f"\n    window.__PUZZLE_HASH__ = '{encoded}';"
+    output_html = template[:script_start] + hash_script + template[script_start:]
+
+    # Write to docs/
+    docs_dir = Path.cwd() / "docs"
+    docs_dir.mkdir(exist_ok=True)
+    output_path = docs_dir / "index.html"
+    output_path.write_text(output_html)
+
+    typer.echo(f"\n  Puzzle page written to: {output_path}")
+    typer.echo(f"  Board: {size}×{size}")
+    typer.echo(f"  Hash: {encoded}")
+    typer.echo("\n  To publish:")
+    typer.echo("    1. Enable GitHub Pages in repo Settings → Pages")
+    typer.echo('       Source: "Deploy from a branch", branch: main, folder: /docs')
+    typer.echo("    2. git add docs/ && git commit -m 'New puzzle' && git push")
+    typer.echo("\n  Your puzzle will be live at:")
+    typer.echo("    https://<your-username>.github.io/<repo>/")
+
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(f"file://{output_path}")
+
+
 def _quiet_handler(serve_dir: Path) -> type[SimpleHTTPRequestHandler]:
     """Create a request handler that serves from a specific directory silently."""
     serve_dir_str = str(serve_dir)
