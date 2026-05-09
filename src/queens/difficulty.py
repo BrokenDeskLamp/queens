@@ -358,7 +358,14 @@ class _DeductionState:
         return False
 
     def try_diagonal_elim(self) -> bool:
-        """Eliminate cells via diagonal neighbor analysis."""
+        """Eliminate cells via common neighbor analysis.
+
+        If every remaining cell in a region shares a common 8-neighbor
+        (from a different region), that neighbor cannot hold a queen —
+        whichever cell gets the queen, the neighbor touches it.
+
+        This covers the 2-BLOCK and 3-BLOCK patterns human solvers use.
+        """
         for rid in range(self.n):
             if self.region_has[rid]:
                 continue
@@ -366,29 +373,32 @@ class _DeductionState:
             if not cells or len(cells) > 3:
                 continue
 
-            common_diag: set[tuple[int, int]] | None = None
+            common_neighbors: set[tuple[int, int]] | None = None
             for r, c in cells:
-                diag_neighbors: set[tuple[int, int]] = set()
-                for dr, dc in _DIAGONALS:
-                    nr, nc = r + dr, c + dc
-                    if 0 <= nr < self.n and 0 <= nc < self.n:
-                        other_rid = int(self.regions[nr, nc])
-                        if other_rid != rid and self.available[nr][nc]:
-                            diag_neighbors.add((nr, nc))
-                if common_diag is None:
-                    common_diag = diag_neighbors
+                cell_neighbors: set[tuple[int, int]] = set()
+                for dr in (-1, 0, 1):
+                    for dc in (-1, 0, 1):
+                        if dr == 0 and dc == 0:
+                            continue
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < self.n and 0 <= nc < self.n:
+                            other_rid = int(self.regions[nr, nc])
+                            if other_rid != rid and self.available[nr][nc]:
+                                cell_neighbors.add((nr, nc))
+                if common_neighbors is None:
+                    common_neighbors = cell_neighbors
                 else:
-                    common_diag &= diag_neighbors
+                    common_neighbors &= cell_neighbors
 
-            if common_diag:
+            if common_neighbors:
                 changed = False
-                for nr, nc in common_diag:
+                for nr, nc in common_neighbors:
                     if self.available[nr][nc]:
                         self.available[nr][nc] = False
                         changed = True
                 if changed:
                     self._record_technique("diagonal_elimination")
-                    self.steps.append(f"Diagonal elimination from region {rid}")
+                    self.steps.append(f"Common neighbor elimination from region {rid}")
                     return True
 
         return False
