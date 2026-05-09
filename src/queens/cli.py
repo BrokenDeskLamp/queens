@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import json
 import random
+import socketserver
+import threading
 import time
+import webbrowser
+from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 from typing import Annotated
 
@@ -13,6 +17,7 @@ import typer
 from .board import Board
 from .generator import GenerationError, generate_board
 from .render import render_board_png
+from .share import encode_board
 from .solver import count_solutions
 
 app = typer.Typer(no_args_is_help=True)
@@ -130,3 +135,98 @@ def benchmark(
         f"\nSize: {size}×{size} | Generated: {success}/{count} | Avg: {avg * 1000:.1f}ms",
         err=True,
     )
+
+
+@app.command()
+def share(
+    size: Annotated[int, typer.Option("--size", "-n", help="Board size (N×N)")] = 8,
+    difficulty: Annotated[
+        str | None,
+        typer.Option(
+            "--difficulty",
+            "-d",
+            help="Target difficulty: trivial, easy, medium, hard, expert, master",
+        ),
+    ] = None,
+    seed: Annotated[int | None, typer.Option("--seed", "-s")] = None,
+    port: Annotated[int, typer.Option("--port", "-p", help="HTTP server port")] = 8765,
+    open_browser: Annotated[
+        bool, typer.Option("--open/--no-open", help="Open browser automatically")
+    ] = True,
+) -> None:
+    """Generate a board and open it as an interactive puzzle in the browser.
+
+    Starts a local HTTP server, generates a playable Queens puzzle,
+    and opens it in your browser. The board data is encoded in the
+    URL hash — no solution is ever sent. Share the URL with others
+    on the same network.
+    """
+    diff_map: dict[str, int] = {
+        "trivial": 0,
+        "easy": 1,
+        "medium": 2,
+        "hard": 3,
+        "expert": 4,
+        "master": 5,
+    }
+    target = diff_map.get(difficulty.lower()) if difficulty else None
+    if difficulty and target is None:
+        valid = ", ".join(diff_map)
+        typer.echo(f"Invalid difficulty. Choose from: {valid}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"Generating {size}×{size} board...", err=True)
+    board = generate_board(
+        size,
+        target_difficulty=target,
+        seed=seed,
+    )
+
+    # Encode board as URL hash
+    regions_list = board.regions.tolist()
+    encoded = encode_board(size, regions_list)
+    puzzle_url = f"/play.html#{encoded}"
+
+    # Serve play.html from the package directory
+    serve_dir = Path(__file__).resolve().parent
+    play_html = serve_dir / "play.html"
+    if not play_html.exists():
+        typer.echo(f"Error: play.html not found at {serve_dir}", err=True)
+        raise typer.Exit(1)
+
+    # Start HTTP server in background
+    handler = _quiet_handler(serve_dir)
+    httpd = socketserver.TCPServer(("", port), handler)
+    server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    server_thread.start()
+
+    full_url = f"http://localhost:{port}{puzzle_url}"
+
+    typer.echo(f"\n  Puzzle URL: {full_url}\n")
+    typer.echo(f"  Serving from: {serve_dir}")
+    typer.echo("  Press Ctrl+C to stop the server.\n")
+
+    if open_browser:
+        webbrowser.open(full_url)
+
+    try:
+        # Keep the server running until interrupted
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        typer.echo("\nServer stopped.", err=True)
+        httpd.shutdown()
+
+
+def _quiet_handler(serve_dir: Path) -> type[SimpleHTTPRequestHandler]:
+    """Create a request handler that serves from a specific directory silently."""
+    serve_dir_str = str(serve_dir)
+
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *args: object, **kwargs: object) -> None:  # noqa: ARG002
+            super().__init__(*args, directory=serve_dir_str)  # type: ignore[misc]
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass  # Suppress access log noise
+
+    return Handler

@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Queens Puzzle</title>
+<meta property="og:title" content="Queens Puzzle">
+<meta property="og:description" content="Place one 👑 in each row, column, and coloured region. No two can touch!">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { -webkit-tap-highlight-color: transparent; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #f5f5f5; color: #1a1a1a;
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100dvh; padding: 16px;
+  }
+  #app {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 20px; max-width: 520px; width: 100%;
+  }
+  h1 { font-size: 1.5rem; font-weight: 700; user-select: none; }
+  #board {
+    display: grid; gap: 3px;
+    width: 100%; aspect-ratio: 1;
+    background: #d0d0d0; border-radius: 10px;
+    padding: 3px;
+    user-select: none; -webkit-user-select: none;
+    touch-action: manipulation;
+  }
+  .cell {
+    aspect-ratio: 1; border-radius: 7px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: clamp(16px, 5vw, 36px);
+    cursor: pointer; transition: background-color 0.15s, box-shadow 0.15s;
+    position: relative;
+  }
+  .cell:active { filter: brightness(0.92); }
+  .cell.x-mark::after {
+    content: '✕'; color: rgba(0,0,0,0.25);
+    font-size: 0.65em; font-weight: 300;
+  }
+  .cell.queen { font-size: clamp(18px, 6vw, 42px); }
+  .cell.conflict {
+    box-shadow: inset 0 0 0 3px #e53e3e, 0 0 8px rgba(229,62,62,0.5);
+    animation: pulse 0.8s ease-in-out infinite alternate;
+  }
+  @keyframes pulse {
+    from { box-shadow: inset 0 0 0 3px #e53e3e, 0 0 8px rgba(229,62,62,0.4); }
+    to   { box-shadow: inset 0 0 0 3px #e53e3e, 0 0 16px rgba(229,62,62,0.7); }
+  }
+  #message {
+    font-size: 0.9rem; min-height: 1.4em; text-align: center;
+    color: #e53e3e; font-weight: 500;
+  }
+  #message.win { color: #2f855a; font-size: 1.1rem; font-weight: 700; }
+  #controls { display: flex; gap: 12px; }
+  #controls button {
+    padding: 10px 20px; border: none; border-radius: 8px;
+    background: #e2e8f0; color: #1a1a1a;
+    font-size: 0.95rem; font-weight: 600; cursor: pointer;
+    transition: background 0.15s;
+  }
+  #controls button:active { background: #cbd5e0; }
+  #controls button.primary { background: #2b6cb0; color: #fff; }
+  #controls button.primary:active { background: #2c5282; }
+  #size-warning {
+    font-size: 0.85rem; color: #a0aec0; text-align: center;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>👑 Queens</h1>
+  <div id="board"></div>
+  <div id="message"></div>
+  <div id="controls">
+    <button id="undo-btn" title="Undo last queen">↩ Undo</button>
+    <button id="clear-btn" title="Clear board">🗑 Clear</button>
+  </div>
+  <div id="size-warning"></div>
+</div>
+
+<script>
+// ── Decode board from URL hash ──────────────────────────────────────────
+function decodeBoard(hash) {
+  if (!hash || hash.length < 2) return null;
+  const nChar = hash[0];
+  const n = '0123456789abcdefghijklmnopqrstuvwxyz'.indexOf(nChar);
+  if (n < 4 || n > 15) return null;
+
+  const encoded = hash.slice(1);
+  const bitsPerCell = n <= 8 ? 3 : 4;
+  const totalBits = n * n * bitsPerCell;
+  const byteCount = Math.ceil(totalBits / 8);
+
+  // Decode base64url
+  let b64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+  while (b64.length % 4) b64 += '=';
+  let binary;
+  try {
+    binary = atob(b64);
+  } catch { return null; }
+
+  // Read bitstream via byte array
+  const bytes = new Uint8Array(byteCount);
+  for (let i = 0; i < Math.min(binary.length, byteCount); i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+
+  const regions = [];
+  const mask = (1 << bitsPerCell) - 1;
+  let buf = 0, bitsInBuf = 0, byteIdx = 0;
+
+  for (let r = 0; r < n; r++) {
+    const row = [];
+    for (let c = 0; c < n; c++) {
+      while (bitsInBuf < bitsPerCell) {
+        buf = (buf << 8) | (byteIdx < byteCount ? bytes[byteIdx++] : 0);
+        bitsInBuf += 8;
+      }
+      bitsInBuf -= bitsPerCell;
+      const rid = (buf >> bitsInBuf) & mask;
+      row.push(rid);
+    }
+    regions.push(row);
+  }
+  return { n, regions };
+}
+
+// ── Palette generation ──────────────────────────────────────────────────
+function generatePalette(n) {
+  // Hand-picked hue offsets to keep adjacent indices visually distinct
+  const offsets = [0, 137, 45, 280, 90, 320, 180, 230, 15, 260, 60, 300, 120, 340, 75, 200, 30, 150, 210, 350];
+  return Array.from({length: n}, (_, i) => {
+    const h = (offsets[i % offsets.length] + (Math.floor(i / offsets.length) * 37)) % 360;
+    return `hsl(${h}, 62%, 78%)`;
+  });
+}
+
+// ── Conflict detection ──────────────────────────────────────────────────
+function findConflicts(board, queens) {
+  const n = board.n;
+  const conflicts = new Set();
+  const qlist = [];
+  for (const [r, c] of queens) qlist.push([r, c]);
+
+  for (let i = 0; i < qlist.length; i++) {
+    const [r1, c1] = qlist[i];
+    const rid1 = board.regions[r1][c1];
+    for (let j = i + 1; j < qlist.length; j++) {
+      const [r2, c2] = qlist[j];
+      const rid2 = board.regions[r2][c2];
+      if (r1 === r2 || c1 === c2 || rid1 === rid2) {
+        conflicts.add(`${r1},${c1}`);
+        conflicts.add(`${r2},${c2}`);
+      }
+      if (Math.abs(r1 - r2) <= 1 && Math.abs(c1 - c2) <= 1) {
+        conflicts.add(`${r1},${c1}`);
+        conflicts.add(`${r2},${c2}`);
+      }
+    }
+  }
+  return conflicts;
+}
+
+function conflictReason(board, queens) {
+  if (queens.length < 2) return '';
+  const [r1, c1] = queens[queens.length - 1];
+  for (let i = queens.length - 2; i >= 0; i--) {
+    const [r2, c2] = queens[i];
+    if (r1 === r2) return 'Two queens in the same row';
+    if (c1 === c2) return 'Two queens in the same column';
+    if (board.regions[r1][c1] === board.regions[r2][c2]) return 'Two queens in the same region';
+    if (Math.abs(r1 - r2) <= 1 && Math.abs(c1 - c2) <= 1) return 'Queens cannot touch';
+  }
+  return '';
+}
+
+// ── Render ──────────────────────────────────────────────────────────────
+function render(board, state, conflicts) {
+  const n = board.n;
+  const container = document.getElementById('board');
+  const palette = generatePalette(n);
+  const qset = new Set(state.queens.map(([r,c]) => `${r},${c}`));
+  const xset = new Set(state.xs.map(([r,c]) => `${r},${c}`));
+
+  container.style.gridTemplateColumns = `repeat(${n}, 1fr)`;
+  container.innerHTML = '';
+
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      const cell = document.createElement('div');
+      cell.className = 'cell';
+      const rid = board.regions[r][c];
+      cell.style.backgroundColor = palette[rid];
+      cell.dataset.row = r;
+      cell.dataset.col = c;
+
+      const key = `${r},${c}`;
+      if (qset.has(key)) {
+        cell.textContent = '♛';
+        cell.classList.add('queen');
+        if (conflicts.has(key)) cell.classList.add('conflict');
+      } else if (xset.has(key)) {
+        cell.classList.add('x-mark');
+      }
+
+      cell.addEventListener('click', () => handleClick(board, r, c, state));
+      container.appendChild(cell);
+    }
+  }
+}
+
+// ── Game state ──────────────────────────────────────────────────────────
+let gameState = { queens: [], xs: [] };
+
+function handleClick(board, r, c, state) {
+  const key = `${r},${c}`;
+  const qi = state.queens.findIndex(([qr, qc]) => `${qr},${qc}` === key);
+  const xi = state.xs.findIndex(([xr, xc]) => `${xr},${xc}` === key);
+
+  if (qi >= 0) {
+    // Has queen → remove it, become empty
+    state.queens.splice(qi, 1);
+    state.xs.push([r, c]);
+  } else if (xi >= 0) {
+    // Has X → remove it, become empty
+    state.xs.splice(xi, 1);
+  } else {
+    // Empty → place queen
+    state.queens.push([r, c]);
+  }
+
+  update(board, state);
+}
+
+function clearBoard(board) {
+  gameState = { queens: [], xs: [] };
+  update(board, gameState);
+}
+
+function undoLast(board) {
+  if (gameState.queens.length === 0 && gameState.xs.length === 0) return;
+  // Undo one action: track a simple history
+  // For simplicity: remove the last-placed queen or last X
+  if (gameState.queens.length > 0) {
+    gameState.queens.pop();
+  } else if (gameState.xs.length > 0) {
+    gameState.xs.pop();
+  }
+  update(board, gameState);
+}
+
+// ── Update cycle ────────────────────────────────────────────────────────
+function update(board, state) {
+  const conflicts = findConflicts(board, state.queens);
+  render(board, state, conflicts);
+
+  const msg = document.getElementById('message');
+  msg.classList.remove('win');
+  if (state.queens.length === board.n && conflicts.size === 0) {
+    msg.textContent = '🎉 Solved! Well done!';
+    msg.classList.add('win');
+  } else if (conflicts.size > 0) {
+    msg.textContent = conflictReason(board, state.queens);
+  } else if (state.queens.length > 0) {
+    msg.textContent = `${state.queens.length}/${board.n} queens placed`;
+  } else {
+    msg.textContent = '';
+  }
+}
+
+// ── Init ────────────────────────────────────────────────────────────────
+function init() {
+  const hash = window.location.hash.slice(1);
+  const board = decodeBoard(hash);
+
+  if (!board) {
+    document.getElementById('message').textContent =
+      'Invalid puzzle link. The URL hash should contain encoded board data.';
+    return;
+  }
+
+  const warning = document.getElementById('size-warning');
+  if (board.n > 10) {
+    warning.textContent = `${board.n}×${board.n} board — best on a larger screen`;
+  }
+
+  // Wire controls
+  document.getElementById('undo-btn').addEventListener('click', () => undoLast(board));
+  document.getElementById('clear-btn').addEventListener('click', () => clearBoard(board));
+
+  update(board, gameState);
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
