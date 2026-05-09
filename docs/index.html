@@ -83,7 +83,7 @@
 </div>
 
 <script>
-    window.__PUZZLE_HASH__ = '8pJJItJJQpJJQpbZLtjbbtre2tu22__22';
+    window.__PUZZLE_HASH__ = '8ASSSQASRSSVJSUVZWUltWUttWX9tW2__';
 // ── Decode board from URL hash or embedded data ───────────────────────
 function getPuzzleHash() {
   // Allow embedding the hash directly in the HTML (for GitHub Pages)
@@ -339,20 +339,20 @@ function cycleCell(board, r, c) {
   const qi = game.queens.findIndex(([qr, qc]) => `${qr},${qc}` === key);
   const autoX = computeAutoX(board, game.queens);
 
-  if (qi >= 0) {
-    // Queen → X (manual)
-    game.queens.splice(qi, 1);
-    game.manualXs.add(key);
-  } else if (game.manualXs.has(key)) {
-    // Manual X → Empty
-    game.manualXs.delete(key);
-  } else if (autoX.has(key)) {
+  if (autoX.has(key)) {
     // Auto-X → remove the queen that caused it
     const qi2 = game.queens.findIndex(([qr, qc]) => qr === r || qc === c);
     if (qi2 >= 0) game.queens.splice(qi2, 1);
-  } else {
-    // Empty → Queen
+  } else if (qi >= 0) {
+    // Queen → Empty
+    game.queens.splice(qi, 1);
+  } else if (game.manualXs.has(key)) {
+    // Manual X → Queen
+    game.manualXs.delete(key);
     game.queens.push([r, c]);
+  } else {
+    // Empty → Manual X
+    game.manualXs.add(key);
   }
 
   update(board);
