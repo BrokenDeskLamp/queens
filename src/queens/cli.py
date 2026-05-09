@@ -15,7 +15,9 @@ from typing import Annotated
 import typer
 
 from .board import Board
+from .difficulty import exhaustive_analyze
 from .generator import GenerationError, generate_board
+from .regions import RegionBuilder, nqueens_aware_build, nqueens_block_build, random_bfs_build
 from .render import render_board_png
 from .share import encode_board
 from .solver import count_solutions
@@ -41,6 +43,14 @@ def generate(
     attempts: Annotated[
         int, typer.Option("--attempts", "-a", help="Max generation attempts")
     ] = 1000,
+    algorithm: Annotated[
+        str,
+        typer.Option(
+            "--algorithm",
+            "-A",
+            help="Generation algorithm: bfs, nqueens-block, cpsat",
+        ),
+    ] = "bfs",
     output: Annotated[
         Path | None,
         typer.Option("--output", "-o", help="Save board as PNG image"),
@@ -61,12 +71,16 @@ def generate(
         typer.echo(f"Invalid difficulty. Choose from: {valid}", err=True)
         raise typer.Exit(1)
 
+    region_func = _resolve_algorithm(algorithm)
+
     start = time.perf_counter()
     board = generate_board(
         size,
         target_difficulty=target,
         seed=seed,
         max_attempts=attempts,
+        region_func=region_func,
+        harden_deduction=(algorithm == "bfs"),
     )
     elapsed = time.perf_counter() - start
 
@@ -79,7 +93,13 @@ def generate(
         render_board_png(board, output)
         typer.echo(f"Saved board image to {output}", err=True)
 
-    typer.echo(f"\nGenerated in {elapsed:.3f}s", err=True)
+    report = exhaustive_analyze(board)
+    typer.echo(
+        f"\nDifficulty: {report.score:.1f} ({report.difficulty_class}) | "
+        f"{report.deduction_placed}/{size} by deduction | "
+        f"Generated in {elapsed:.3f}s",
+        err=True,
+    )
 
 
 @app.command()
@@ -149,6 +169,14 @@ def share(
         ),
     ] = None,
     seed: Annotated[int | None, typer.Option("--seed", "-s")] = None,
+    algorithm: Annotated[
+        str,
+        typer.Option(
+            "--algorithm",
+            "-A",
+            help="Generation algorithm: bfs, nqueens-block, cpsat",
+        ),
+    ] = "bfs",
     port: Annotated[int, typer.Option("--port", "-p", help="HTTP server port")] = 8765,
     open_browser: Annotated[
         bool, typer.Option("--open/--no-open", help="Open browser automatically")
@@ -175,11 +203,15 @@ def share(
         typer.echo(f"Invalid difficulty. Choose from: {valid}", err=True)
         raise typer.Exit(1)
 
-    typer.echo(f"Generating {size}×{size} board...", err=True)
+    region_func = _resolve_algorithm(algorithm)
+
+    typer.echo(f"Generating {size}×{size} board ({algorithm})...", err=True)
     board = generate_board(
         size,
         target_difficulty=target,
         seed=seed,
+        region_func=region_func,
+        harden_deduction=(algorithm == "bfs"),
     )
 
     # Encode board as URL hash
@@ -256,11 +288,15 @@ def pages(
         typer.echo(f"Invalid difficulty. Choose from: {valid}", err=True)
         raise typer.Exit(1)
 
+    region_func = _resolve_algorithm("bfs")
+
     typer.echo(f"Generating {size}×{size} board...", err=True)
     board = generate_board(
         size,
         target_difficulty=target,
         seed=seed,
+        region_func=region_func,
+        harden_deduction=True,
     )
 
     # Encode board as URL hash
@@ -300,9 +336,20 @@ def pages(
     typer.echo("    https://<your-username>.github.io/<repo>/")
 
     if open_browser:
-        import webbrowser
-
         webbrowser.open(f"file://{output_path}")
+
+
+def _resolve_algorithm(name: str) -> RegionBuilder:
+    """Resolve an algorithm name to a region builder function."""
+    mapping: dict[str, RegionBuilder] = {
+        "bfs": random_bfs_build,
+        "nqueens-block": nqueens_block_build,
+        "cpsat": nqueens_aware_build,
+    }
+    if name not in mapping:
+        valid = ", ".join(mapping)
+        raise typer.BadParameter(f"Unknown algorithm '{name}'. Choose from: {valid}")
+    return mapping[name]
 
 
 def _quiet_handler(serve_dir: Path) -> type[SimpleHTTPRequestHandler]:

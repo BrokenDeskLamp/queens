@@ -296,7 +296,139 @@ def _transfer_cell_to_region(
     return False
 
 
-# ── Anti-deduction refinement ───────────────────────────────────────────
+# ── N-Queens block builder (greedy alternative blocking) ─────────────
+
+
+def nqueens_block_build(n: int, placement: Placement, rng: random.Random) -> Board:
+    """Build regions by greedily blocking all N-Queens alternatives.
+
+    1. Start with BFS regions (connected baseline).
+    2. Find which N-Queens alternatives are currently valid on the board.
+    3. For each valid alternative, transfer cells between regions to
+       make it invalid (2+ of its queen cells in one region).
+    4. Re-verify uniqueness; if broken, use hot-spot refinement.
+
+    Args:
+        n: Board size.
+        placement: N queen positions (the unique solution).
+        rng: Random number generator.
+
+    Returns:
+        A Board with regions assigned.
+    """
+    # Phase 1: BFS baseline
+    regions = _simultaneous_bfs(n, placement, rng)
+
+    # Phase 2: Enumerate alternatives
+    all_alts = _all_nqueens_solutions(n)
+    target_bits = _placement_to_bits(n, placement)
+
+    if len(all_alts) <= 1:
+        return Board(n=n, regions=regions, solution=placement)
+
+    # Precompute: cell -> list of alternative indices that have a queen there
+    cell_to_alts: list[list[int]] = [[] for _ in range(n * n)]
+    for alt_idx, alt_bits in enumerate(all_alts):
+        if alt_bits == target_bits:
+            continue
+        alt_queens = _unpack_solution(n, alt_bits)
+        for r, c in alt_queens:
+            cell_to_alts[r * n + c].append(alt_idx)
+
+    # Phase 3: Iteratively block alternatives
+    intended = set(placement)
+    max_iterations = 40
+
+    for _iteration in range(max_iterations):
+        # Find currently valid alternatives
+        valid_alts = _find_valid_alternatives(regions, n, all_alts, target_bits, intended)
+        if not valid_alts:
+            break
+
+        rng.shuffle(valid_alts)
+        blocked_this_iter = 0
+
+        for alt_idx in valid_alts[:15]:  # Block up to 15 per iteration
+            alt_queens = _unpack_solution(n, all_alts[alt_idx])
+
+            # Find two alt queen cells in different regions
+            # that aren't target queen cells
+            reg_to_cells: dict[int, list[tuple[int, int]]] = {}
+            for qr, qc in alt_queens:
+                if (qr, qc) in intended:
+                    continue
+                rid = int(regions[qr, qc])
+                reg_to_cells.setdefault(rid, []).append((qr, qc))
+
+            # Try to merge two cells from different regions into one region
+            region_items = list(reg_to_cells.items())
+            blocked = False
+            for i in range(len(region_items)):
+                for j in range(i + 1, len(region_items)):
+                    rid_i, cells_i = region_items[i]
+                    rid_j, cells_j = region_items[j]
+
+                    # Try transferring from i to j
+                    for ci in cells_i:
+                        if _transfer_cell_to_region(regions, n, ci[0], ci[1], rid_j):
+                            blocked = True
+                            blocked_this_iter += 1
+                            break
+                    if blocked:
+                        break
+
+                    # Try transferring from j to i
+                    for cj in cells_j:
+                        if _transfer_cell_to_region(regions, n, cj[0], cj[1], rid_i):
+                            blocked = True
+                            blocked_this_iter += 1
+                            break
+                    if blocked:
+                        break
+                if blocked:
+                    break
+
+        if blocked_this_iter == 0:
+            break
+
+    # Phase 4: Verify connectivity and fix if needed
+    _ensure_all_connected(regions, n, placement, rng)
+
+    return Board(n=n, regions=regions, solution=placement)
+
+
+def _find_valid_alternatives(
+    regions: np.ndarray,
+    n: int,
+    all_alts: list[int],
+    target_bits: int,
+    intended: set[tuple[int, int]],
+) -> list[int]:
+    """Return indices of alternatives that are currently valid board solutions.
+
+    An alternative is valid if its N queen positions each land in a
+    different region (ignoring target queen positions which are forced).
+    """
+    valid: list[int] = []
+    for alt_idx, alt_bits in enumerate(all_alts):
+        if alt_bits == target_bits:
+            continue
+        alt_queens = _unpack_solution(n, alt_bits)
+        seen_regions: set[int] = set()
+        is_valid = True
+        for qr, qc in alt_queens:
+            if (qr, qc) in intended:
+                continue  # target queen — already accounted for
+            rid = int(regions[qr, qc])
+            if rid in seen_regions:
+                is_valid = False
+                break
+            seen_regions.add(rid)
+        if is_valid and len(seen_regions) == n - len(
+            [1 for qr, qc in alt_queens if (qr, qc) in intended]
+        ):
+            valid.append(alt_idx)
+    return valid
 
 
 def _anti_deduction_refine(
