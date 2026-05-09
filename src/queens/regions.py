@@ -7,7 +7,7 @@ regions, each containing exactly one queen.
 from __future__ import annotations
 
 import random
-from collections import deque
+from collections import Counter, deque
 from typing import Protocol
 
 import numpy as np
@@ -16,6 +16,15 @@ from .board import Board, Placement
 from .solver import find_up_to_k_solutions
 
 _DIRECTIONS: tuple[tuple[int, int], ...] = ((0, 1), (0, -1), (1, 0), (-1, 0))
+
+# How many alternative solutions to examine during refinement.
+# More alternatives → better targeting of multi-solution "hot spots".
+_MAX_ALT_SOLUTIONS = 20
+
+# Maximum refinement iterations before giving up and letting the retry loop
+# handle it. Each iteration examines all alternatives and transfers multiple
+# cells, so fewer iterations are needed than before.
+_MAX_REFINE_ITERS = 30
 
 
 class RegionBuilder(Protocol):
@@ -28,8 +37,10 @@ def random_bfs_build(n: int, placement: Placement, rng: random.Random) -> Board:
     """Build regions via simultaneous BFS growth, then refine for uniqueness.
 
     1. Grow all regions simultaneously from each queen (Voronoi-like).
-    2. If the board has multiple solutions, iteratively transfer cells
-       between regions to break alternative solutions found by the solver.
+    2. Find up to 20 alternative solutions and build a "heat map" of cells
+       that appear as queens in many alternatives.
+    3. Transfer hot-spot cells (and their same-region neighbours) to
+       adjacent regions, blocking many alternatives at once.
 
     Guarantees:
     - Every region is 4-connected.
@@ -44,27 +55,44 @@ def random_bfs_build(n: int, placement: Placement, rng: random.Random) -> Board:
     Returns:
         A Board with regions assigned.
     """
-    # Phase 1: simultaneous BFS growth
     regions = _simultaneous_bfs(n, placement, rng)
     board = Board(n=n, regions=regions, solution=placement)
 
-    # Phase 2: refine to eliminate alternative solutions
-    for _refine in range(50):
-        solns = find_up_to_k_solutions(board, k=2)
-        if len(solns) <= 1:
+    for _iteration in range(_MAX_REFINE_ITERS):
+        alt_solutions = find_up_to_k_solutions(board, k=_MAX_ALT_SOLUTIONS + 1)
+        if len(alt_solutions) <= 1:
             return board
 
-        # solns[0] should be the intended solution, solns[1] is alternative
-        alt = set(solns[1])
+        # Build heat map: cell → how many alternative solutions place a queen there
         intended = set(placement)
+        heat: Counter[tuple[int, int]] = Counter()
+        for sol in alt_solutions:
+            for pos in sol:
+                if pos not in intended:
+                    heat[pos] += 1
 
-        # Find a cell in the alternative solution that differs from intended
-        extra = list(alt - intended)
-        if not extra:
-            break
+        if not heat:
+            return board
 
-        r, c = extra[rng.randint(0, len(extra) - 1)]
-        _transfer_cell(regions, n, r, c, rng, placement)
+        # Sort hot-spots by frequency (most common alternatives first)
+        hot_spots = [pos for pos, _ in heat.most_common()]
+        rng.shuffle(hot_spots)  # shuffle equally-hot cells for variety
+
+        # Transfer top hot-spots (up to 3 per iteration for meaningful reshaping)
+        transferred = 0
+        for r, c in hot_spots:
+            if transferred >= 3:
+                break
+            if (r, c) in intended:
+                continue
+            # Transfer this cell and its transferable same-region neighbours
+            count = _transfer_patch(regions, n, r, c, rng, placement)
+            if count > 0:
+                transferred += count
+
+        if transferred == 0:
+            break  # No transferable cells left — give up
+
         board = Board(n=n, regions=regions.copy(), solution=placement)
 
     return board
@@ -113,6 +141,46 @@ def _simultaneous_bfs(n: int, placement: Placement, rng: random.Random) -> np.nd
     return regions
 
 
+def _transfer_patch(
+    regions: np.ndarray,
+    n: int,
+    seed_r: int,
+    seed_c: int,
+    rng: random.Random,
+    placement: Placement,
+) -> int:
+    """Transfer a hot-spot cell and its transferable same-region neighbours.
+
+    Returns the number of cells actually transferred.
+    """
+    intended = set(placement)
+    source_rid = int(regions[seed_r, seed_c])
+
+    # Collect cells to attempt: the seed plus up to 3 same-region neighbours
+    candidates: list[tuple[int, int]] = [(seed_r, seed_c)]
+    dirs = list(_DIRECTIONS)
+    rng.shuffle(dirs)
+    for dr, dc in dirs:
+        nr, nc = seed_r + dr, seed_c + dc
+        if (
+            0 <= nr < n
+            and 0 <= nc < n
+            and int(regions[nr, nc]) == source_rid
+            and (nr, nc) not in intended
+        ):
+            candidates.append((nr, nc))
+            if len(candidates) >= 4:
+                break
+
+    # Transfer each candidate, stopping at the first one that would disconnect
+    transferred = 0
+    for r, c in candidates:
+        if _transfer_cell(regions, n, r, c, rng, placement):
+            transferred += 1
+
+    return transferred
+
+
 def _transfer_cell(
     regions: np.ndarray,
     n: int,
@@ -120,22 +188,19 @@ def _transfer_cell(
     c: int,
     rng: random.Random,
     placement: Placement,
-) -> None:
-    """Transfer cell (r,c) to an adjacent region, avoiding queen cells.
+) -> bool:
+    """Transfer a single cell to an adjacent region.
 
-    Only transfers if it won't disconnect the source region.
+    Returns True if the transfer succeeded, False if it was blocked.
     """
     current_rid = int(regions[r, c])
 
-    # Don't transfer queen cells
     if (r, c) in set(placement):
-        return
+        return False
 
-    # Check that removing this cell won't disconnect its region
     if _would_disconnect(regions, n, r, c, current_rid):
-        return
+        return False
 
-    # Find adjacent regions that are not the current one
     candidates: list[tuple[int, int]] = []
     seen: set[int] = set()
     for dr, dc in _DIRECTIONS:
@@ -147,12 +212,12 @@ def _transfer_cell(
                 candidates.append((nr, nc))
 
     if not candidates:
-        return
+        return False
 
-    # Pick a random neighbor region to transfer to
     nr, nc = candidates[rng.randint(0, len(candidates) - 1)]
     new_rid = int(regions[nr, nc])
     regions[r, c] = new_rid
+    return True
 
 
 def _would_disconnect(
@@ -163,11 +228,9 @@ def _would_disconnect(
     rid: int,
 ) -> bool:
     """Check if removing cell (r,c) would disconnect region rid."""
-    # Temporarily mark as removed, BFS from a neighbor, check coverage
     saved = int(regions[r, c])
     regions[r, c] = -1
 
-    # Find a starting neighbor of the same region
     start: tuple[int, int] | None = None
     total_cells = 0
     for dr, dc in _DIRECTIONS:
@@ -177,17 +240,14 @@ def _would_disconnect(
             break
 
     if start is None:
-        # This was the only cell in the region — shouldn't happen
         regions[r, c] = saved
-        return True  # Would disconnect (region becomes empty)
+        return True
 
-    # Count total cells in this region (excluding (r,c))
     for rr in range(n):
         for cc in range(n):
             if int(regions[rr, cc]) == rid:
                 total_cells += 1
 
-    # BFS from start
     visited: set[tuple[int, int]] = {start}
     queue: list[tuple[int, int]] = [start]
     while queue:

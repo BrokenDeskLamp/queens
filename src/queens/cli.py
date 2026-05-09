@@ -12,6 +12,7 @@ import typer
 
 from .board import Board
 from .generator import GenerationError, generate_board
+from .render import render_board_png
 from .solver import count_solutions
 
 app = typer.Typer(no_args_is_help=True)
@@ -35,6 +36,10 @@ def generate(
     attempts: Annotated[
         int, typer.Option("--attempts", "-a", help="Max generation attempts")
     ] = 1000,
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Save board as PNG image"),
+    ] = None,
 ) -> None:
     """Generate a valid Queens board."""
     diff_map: dict[str, int] = {
@@ -64,6 +69,10 @@ def generate(
         typer.echo(json.dumps(board.to_json()))
     else:
         typer.echo(board.to_ascii())
+
+    if output is not None:
+        render_board_png(board, output)
+        typer.echo(f"Saved board image to {output}", err=True)
 
     typer.echo(f"\nGenerated in {elapsed:.3f}s", err=True)
 
