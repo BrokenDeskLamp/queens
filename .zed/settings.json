@@ -1,0 +1,22 @@
+{
+  "lsp": {
+    "pyrefly": {
+      "binary": {
+        "path": "/usr/local/bin/uv",
+        "arguments": ["tool", "run", "pyrefly", "lsp"]
+      }
+    },
+    "ruff": {
+      "binary": {
+        "path": "/usr/local/bin/uv",
+        "arguments": ["tool", "run", "ruff", "server"]
+      }
+    }
+  },
+  "languages": {
+    "Python": {
+      "language_servers": ["pyrefly", "ruff"],
+      "format_on_save": "off"
+    }
+  }
+}
