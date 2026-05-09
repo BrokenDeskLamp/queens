@@ -317,8 +317,10 @@ function handlePointerEnd(e, board) {
 
   if (!dragState.active) {
     // It was a click, not a drag — cycle cell state
-    const key = `${dragState.startRow},${dragState.startCol}`;
     cycleCell(board, dragState.startRow, dragState.startCol);
+  } else {
+    // Drag ended — do final full render to sync auto-X, queen conflicts, etc.
+    update(board);
   }
 
   dragState = null;
@@ -326,11 +328,16 @@ function handlePointerEnd(e, board) {
 
 function applyDragMarks(board, ds) {
   const qSet = new Set(game.queens.map(([r,c]) => `${r},${c}`));
+  const boardEl = document.getElementById('board');
   for (const key of ds.touched) {
-    if (qSet.has(key)) continue; // don't overwrite queens
+    if (qSet.has(key)) continue;
     game.manualXs.add(key);
+    // Lightweight DOM update — add x-mark directly without full re-render.
+    // Full re-render (innerHTML = '') on mobile cancels the touch sequence.
+    const [rr, cc] = key.split(',').map(Number);
+    const cell = boardEl.querySelector(`[data-row='${rr}'][data-col='${cc}']`);
+    if (cell) cell.classList.add('x-mark');
   }
-  update(board);
 }
 
 function cycleCell(board, r, c) {
