@@ -25,7 +25,7 @@ def generate_board(
     *,
     place_func: PlacementStrategy = backtracking_placement,
     region_func: RegionBuilder = random_bfs_build,
-    target_difficulty: int | None = None,
+    target_difficulty: float | None = None,
     difficulty_fn: DifficultyAnalyzer = layered_analyze,
     max_attempts: int = 1000,
     seed: int | None = None,
@@ -43,7 +43,7 @@ def generate_board(
         place_func: Strategy for placing initial queens.
         region_func: Strategy for building coloured regions.
         target_difficulty: If set, only return boards at or above
-            this difficulty layer (0-5).
+            this difficulty score (float, 0–10+).
         difficulty_fn: Function for difficulty assessment.
         max_attempts: Maximum generation attempts before raising.
         seed: Random seed for reproducibility.

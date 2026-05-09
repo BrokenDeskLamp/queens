@@ -47,13 +47,13 @@ def generate(
     ] = None,
 ) -> None:
     """Generate a valid Queens board."""
-    diff_map: dict[str, int] = {
-        "trivial": 0,
-        "easy": 1,
-        "medium": 2,
-        "hard": 3,
-        "expert": 4,
-        "master": 5,
+    diff_map: dict[str, float] = {
+        "trivial": 0.0,
+        "easy": 1.0,
+        "medium": 2.0,
+        "hard": 4.0,
+        "expert": 7.0,
+        "master": 10.0,
     }
     target = diff_map.get(difficulty.lower()) if difficulty else None
     if difficulty and target is None:
@@ -161,13 +161,13 @@ def share(
     URL hash — no solution is ever sent. Share the URL with others
     on the same network.
     """
-    diff_map: dict[str, int] = {
-        "trivial": 0,
-        "easy": 1,
-        "medium": 2,
-        "hard": 3,
-        "expert": 4,
-        "master": 5,
+    diff_map: dict[str, float] = {
+        "trivial": 0.0,
+        "easy": 1.0,
+        "medium": 2.0,
+        "hard": 4.0,
+        "expert": 7.0,
+        "master": 10.0,
     }
     target = diff_map.get(difficulty.lower()) if difficulty else None
     if difficulty and target is None:

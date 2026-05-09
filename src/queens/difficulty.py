@@ -1,8 +1,7 @@
 """Difficulty analysis for Queens boards.
 
-Uses a layered logic-only solver. Each layer has access to
-more advanced deduction techniques. The board's difficulty
-is the minimum layer that can solve it without backtracking.
+Uses exhaustive deduction followed by recursive hypothetical search
+to measure the true objective solving difficulty.
 """
 
 from __future__ import annotations
@@ -23,20 +22,97 @@ _NEIGHBORS: tuple[tuple[int, int], ...] = (
     (1, 1),
 )
 
+_DIAGONALS: tuple[tuple[int, int], ...] = (
+    (1, 1),
+    (1, -1),
+    (-1, 1),
+    (-1, -1),
+)
+
 
 @dataclass(frozen=True)
 class DifficultyReport:
-    """Result of difficulty analysis.
+    """Result of objective difficulty analysis.
 
     Attributes:
-        score: Minimum technique layer needed (0-5).
-        techniques_used: Specific deduction techniques that triggered.
-        solve_path: Step-by-step description of the solve.
+        score: Continuous difficulty score (0–10+). Higher = harder.
+        difficulty_class: Human-readable class (trivial/easy/medium/hard/expert/master).
+        deduction_placed: Queens placed by pure deduction (no guessing).
+        deduction_total: Board size N.
+        max_hypo_depth: Deepest nested hypothesis level that made progress (0 = none).
+        hypotheses_tested: Total cells tested in hypothetical analysis.
+        cells_eliminated: Cells proven impossible by hypotheticals.
+        solved_by_deduction: Whether deduction alone solves the board.
+        techniques_used: Deduction techniques that contributed.
     """
 
-    score: int
+    score: float
+    difficulty_class: str
+    deduction_placed: int
+    deduction_total: int
+    max_hypo_depth: int
+    hypotheses_tested: int
+    cells_eliminated: int
+    solved_by_deduction: bool
     techniques_used: tuple[str, ...]
-    solve_path: tuple[str, ...]
+
+
+def _compute_class(score: float) -> str:
+    if score < 1:
+        return "trivial"
+    if score < 2:
+        return "easy"
+    if score < 4:
+        return "medium"
+    if score < 7:
+        return "hard"
+    if score < 10:
+        return "expert"
+    return "master"
+
+
+def _compute_score(
+    n: int,
+    deduction_placed: int,
+    max_hypo_depth: int,
+    hypotheses_tested: int,
+    cells_eliminated: int,
+    technique_counts: dict[str, int],
+) -> float:
+    """Compute continuous difficulty score from analysis results."""
+    deduction_gap = 1.0 - deduction_placed / n
+
+    if deduction_gap == 0:
+        # Deduction solves the board — score based on technique complexity.
+        # Each technique carries a weight; more sophisticated techniques = higher score.
+        weights = {
+            "forced_singleton": 0.1,
+            "region_line_lock": 0.3,
+            "region_group_lock": 0.6,
+            "diagonal_elimination": 0.5,
+        }
+        complexity = sum(weights.get(t, 0.1) * c for t, c in technique_counts.items())
+        return round(min(complexity / n, 0.99), 2)
+
+    elimination_yield = cells_eliminated / max(hypotheses_tested, 1)
+
+    # Base: higher gap = harder
+    score = deduction_gap * 10
+
+    # Hypo depth factor
+    if max_hypo_depth == 0:
+        score *= 0.5
+    elif max_hypo_depth == 1:
+        score *= 1.0
+    elif max_hypo_depth == 2:
+        score *= 1.5
+    else:
+        score *= 2.0
+
+    # Resistance factor: low yield = board resists even hypotheticals
+    score *= 2.0 - elimination_yield
+
+    return round(score, 2)
 
 
 class DifficultyAnalyzer(Protocol):
@@ -45,153 +121,145 @@ class DifficultyAnalyzer(Protocol):
     def __call__(self, board: Board) -> DifficultyReport: ...
 
 
-def layered_analyze(board: Board) -> DifficultyReport:
-    """Analyze board difficulty by running layered logic solvers.
-
-    Tries each layer in order (0 → 5). Returns the first layer
-    that can solve the board without backtracking.
-
-    Layers:
-        0: Forced singleton only
-        1: + Row/col/region elimination
-        2: + Region line lock
-        3: + Region group lock, line group lock
-        4: + Diagonal neighbor elimination
-        5: + Test a Queen (hypothetical chains)
-
-    Args:
-        board: The board to analyze.
-
-    Returns:
-        DifficultyReport with score and techniques used.
-    """
-    for layer in range(6):
-        solved, techniques, path = _try_solve_at_layer(board, layer)
-        if solved:
-            return DifficultyReport(
-                score=layer,
-                techniques_used=tuple(techniques),
-                solve_path=tuple(path),
-            )
-    return DifficultyReport(score=5, techniques_used=(), solve_path=())
+# ── Deduction state ────────────────────────────────────────────────────
 
 
-def _try_solve_at_layer(board: Board, layer: int) -> tuple[bool, list[str], list[str]]:
-    """Attempt to solve using techniques up to the given layer.
+class _DeductionState:
+    """Mutable state for running deduction on a board."""
 
-    Returns:
-        (solved, techniques_used, solve_path)
-    """
-    n = board.n
-    regions = board.regions
+    def __init__(self, n: int, regions: "numpy.ndarray") -> None:  # noqa: F821, UP037
+        self.n = n
+        self.regions = regions
+        self.available: list[list[bool]] = [[True] * n for _ in range(n)]
+        self.queens: list[tuple[int, int]] = []
+        self.row_has: list[bool] = [False] * n
+        self.col_has: list[bool] = [False] * n
+        self.region_has: list[bool] = [False] * n
 
-    # State
-    available: list[list[bool]] = [[True] * n for _ in range(n)]
-    queens: list[tuple[int, int]] = []
-    row_has = [False] * n
-    col_has = [False] * n
-    region_has = [False] * n
+        self.region_cells: list[set[tuple[int, int]]] = [set() for _ in range(n)]
+        for r in range(n):
+            for c in range(n):
+                self.region_cells[int(regions[r, c])].add((r, c))
 
-    # Precompute region cells
-    region_cells: list[set[tuple[int, int]]] = [set() for _ in range(n)]
-    for r in range(n):
-        for c in range(n):
-            region_cells[int(regions[r, c])].add((r, c))
+        self.techniques: list[str] = []
+        self.technique_counts: dict[str, int] = {}
+        self.steps: list[str] = []
 
-    techniques: list[str] = []
-    path: list[str] = []
+    # ── helpers ─────────────────────────────────────────────────
 
-    # ---- helpers ----
+    @property
+    def queens_count(self) -> int:
+        return len(self.queens)
 
-    def _region_avail(rid: int) -> list[tuple[int, int]]:
-        return [(r, c) for r, c in region_cells[rid] if available[r][c]]
+    def _region_avail(self, rid: int) -> list[tuple[int, int]]:
+        return [(r, c) for r, c in self.region_cells[rid] if self.available[r][c]]
 
-    def _row_avail(r: int) -> list[int]:
-        return [c for c in range(n) if available[r][c]]
+    def _row_avail(self, r: int) -> list[int]:
+        return [c for c in range(self.n) if self.available[r][c]]
 
-    def _col_avail(c: int) -> list[int]:
-        return [r for r in range(n) if available[r][c]]
+    def _col_avail(self, c: int) -> list[int]:
+        return [r for r in range(self.n) if self.available[r][c]]
 
-    def _place_queen(r: int, c: int) -> None:
-        rid = int(regions[r, c])
-        # Full elimination
-        for cc in range(n):
-            available[r][cc] = False
-        for rr in range(n):
-            available[rr][c] = False
-        for dr, dc in _NEIGHBORS:
-            nr, nc = r + dr, c + dc
-            if 0 <= nr < n and 0 <= nc < n:
-                available[nr][nc] = False
-        row_has[r] = True
-        col_has[c] = True
-        region_has[rid] = True
-        queens.append((r, c))
-        path.append(f"Queen at ({r},{c}) in region {rid}")
+    def _unsolved_regions(self) -> list[int]:
+        return [rid for rid in range(self.n) if not self.region_has[rid]]
 
-    def _dead_region_exists() -> bool:
-        for rid in range(n):
-            if region_has[rid]:
+    def _dead_region_exists(self) -> bool:
+        for rid in range(self.n):
+            if self.region_has[rid]:
                 continue
-            if not _region_avail(rid):
+            if not self._region_avail(rid):
                 return True
         return False
 
-    # ---- technique: forced singleton ----
+    def _place_queen(self, r: int, c: int) -> None:
+        rid = int(self.regions[r, c])
+        for cc in range(self.n):
+            self.available[r][cc] = False
+        for rr in range(self.n):
+            self.available[rr][c] = False
+        for dr, dc in _NEIGHBORS:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < self.n and 0 <= nc < self.n:
+                self.available[nr][nc] = False
+        self.row_has[r] = True
+        self.col_has[c] = True
+        self.region_has[rid] = True
+        self.queens.append((r, c))
 
-    def _try_forced_singleton() -> bool:
-        """If a region/row/col has exactly one legal cell, place a queen there."""
+    def _record_technique(self, name: str) -> None:
+        self.techniques.append(name)
+        self.technique_counts[name] = self.technique_counts.get(name, 0) + 1
+
+    # ── snapshot / restore ──────────────────────────────────────
+
+    def snapshot(self) -> _Snapshot:
+        return _Snapshot(
+            available=[row[:] for row in self.available],
+            queens=self.queens.copy(),
+            row_has=self.row_has.copy(),
+            col_has=self.col_has.copy(),
+            region_has=self.region_has.copy(),
+        )
+
+    def restore(self, snap: _Snapshot) -> None:
+        self.available = [row[:] for row in snap.available]
+        self.queens = snap.queens.copy()
+        self.row_has = snap.row_has.copy()
+        self.col_has = snap.col_has.copy()
+        self.region_has = snap.region_has.copy()
+
+    # ── deduction techniques ─────────────────────────────────────
+
+    def try_forced_singleton(self) -> bool:
+        """If a region/row/col has exactly one legal cell, place queen there."""
         # Regions
-        for rid in range(n):
-            if region_has[rid]:
+        for rid in range(self.n):
+            if self.region_has[rid]:
                 continue
-            cells = _region_avail(rid)
+            cells = self._region_avail(rid)
             if len(cells) == 1:
                 r, c = cells[0]
-                techniques.append("forced_singleton")
-                _place_queen(r, c)
+                self._record_technique("forced_singleton")
+                self.steps.append(f"Queen at ({r},{c}) — forced singleton in region {rid}")
+                self._place_queen(r, c)
                 return True
 
         # Rows
-        for r in range(n):
-            if row_has[r]:
+        for r in range(self.n):
+            if self.row_has[r]:
                 continue
-            ac = _row_avail(r)
+            ac = self._row_avail(r)
             if len(ac) == 1:
                 c = ac[0]
-                rid = int(regions[r, c])
-                if not region_has[rid]:
-                    techniques.append("forced_singleton")
-                    _place_queen(r, c)
+                rid = int(self.regions[r, c])
+                if not self.region_has[rid]:
+                    self._record_technique("forced_singleton")
+                    self.steps.append(f"Queen at ({r},{c}) — forced singleton in row {r}")
+                    self._place_queen(r, c)
                     return True
 
-        # Cols
-        for c in range(n):
-            if col_has[c]:
+        # Columns
+        for c in range(self.n):
+            if self.col_has[c]:
                 continue
-            ar = _col_avail(c)
+            ar = self._col_avail(c)
             if len(ar) == 1:
                 r = ar[0]
-                rid = int(regions[r, c])
-                if not region_has[rid]:
-                    techniques.append("forced_singleton")
-                    _place_queen(r, c)
+                rid = int(self.regions[r, c])
+                if not self.region_has[rid]:
+                    self._record_technique("forced_singleton")
+                    self.steps.append(f"Queen at ({r},{c}) — forced singleton in col {c}")
+                    self._place_queen(r, c)
                     return True
 
         return False
 
-    # ---- technique: region line lock (layer 2+) ----
-
-    def _try_region_line_lock() -> bool:
-        """Eliminate other regions' cells from a locked row or col.
-
-        If all of a region's remaining cells share a row or col,
-        mark cells of other regions in that row/col as unavailable.
-        """
-        for rid in range(n):
-            if region_has[rid]:
+    def try_region_line_lock(self) -> bool:
+        """Eliminate other regions' cells from a locked row or col."""
+        for rid in range(self.n):
+            if self.region_has[rid]:
                 continue
-            cells = _region_avail(rid)
+            cells = self._region_avail(rid)
             if not cells:
                 continue
 
@@ -200,15 +268,15 @@ def _try_solve_at_layer(board: Board, layer: int) -> tuple[bool, list[str], list
             if len(rows) == 1:
                 row = rows.pop()
                 changed = False
-                for c in range(n):
-                    if available[row][c]:
-                        other_rid = int(regions[row, c])
-                        if other_rid != rid and not region_has[other_rid]:
-                            available[row][c] = False
+                for c in range(self.n):
+                    if self.available[row][c]:
+                        other_rid = int(self.regions[row, c])
+                        if other_rid != rid and not self.region_has[other_rid]:
+                            self.available[row][c] = False
                             changed = True
                 if changed:
-                    techniques.append("region_line_lock")
-                    path.append(f"Region {rid} line-locked to row {row}")
+                    self._record_technique("region_line_lock")
+                    self.steps.append(f"Region {rid} line-locked to row {row}")
                     return True
 
             # All in same column?
@@ -216,60 +284,51 @@ def _try_solve_at_layer(board: Board, layer: int) -> tuple[bool, list[str], list
             if len(cols) == 1:
                 col = cols.pop()
                 changed = False
-                for r in range(n):
-                    if available[r][col]:
-                        other_rid = int(regions[r, col])
-                        if other_rid != rid and not region_has[other_rid]:
-                            available[r][col] = False
+                for r in range(self.n):
+                    if self.available[r][col]:
+                        other_rid = int(self.regions[r, col])
+                        if other_rid != rid and not self.region_has[other_rid]:
+                            self.available[r][col] = False
                             changed = True
                 if changed:
-                    techniques.append("region_line_lock")
-                    path.append(f"Region {rid} line-locked to col {col}")
+                    self._record_technique("region_line_lock")
+                    self.steps.append(f"Region {rid} line-locked to col {col}")
                     return True
 
         return False
 
-    # ---- technique: region group lock (layer 3+) ----
-
-    def _try_region_group_lock() -> bool:
-        """Eliminate cells via region group locks.
-
-        If K regions' cells are contained within K rows or cols,
-        eliminate other regions' cells from those rows/cols,
-        and eliminate those regions' cells outside the locked set.
-        """
-        unsolved = [rid for rid in range(n) if not region_has[rid]]
+    def try_region_group_lock(self) -> bool:
+        """If K regions span ≤K rows/cols, eliminate other regions there."""
+        unsolved = self._unsolved_regions()
         if len(unsolved) < 2:
             return False
 
         # Row group lock
-        # For each subset size K ≥ 2, check if K regions fit in ≤ K rows
         for k in range(2, len(unsolved) + 1):
             for subset in _choose_k(unsolved, k):
                 rows_used: set[int] = set()
                 for rid in subset:
-                    for r, _ in _region_avail(rid):
+                    for r, _ in self._region_avail(rid):
                         rows_used.add(r)
                 if len(rows_used) <= k:
-                    # These K regions occupy at most K rows —
-                    # eliminate cells of these regions outside those rows,
-                    # and eliminate other regions' cells inside those rows.
                     changed = False
                     for rid in subset:
-                        for r, c in _region_avail(rid):
+                        for r, c in self._region_avail(rid):
                             if r not in rows_used:
-                                available[r][c] = False
+                                self.available[r][c] = False
                                 changed = True
                     for other_rid in unsolved:
                         if other_rid in subset:
                             continue
-                        for r, c in _region_avail(other_rid):
+                        for r, c in self._region_avail(other_rid):
                             if r in rows_used:
-                                available[r][c] = False
+                                self.available[r][c] = False
                                 changed = True
                     if changed:
-                        techniques.append("region_group_lock")
-                        path.append(f"Group lock: {len(subset)} regions in {len(rows_used)} rows")
+                        self._record_technique("region_group_lock")
+                        self.steps.append(
+                            f"Group lock: {len(subset)} regions in {len(rows_used)} rows"
+                        )
                         return True
 
         # Column group lock
@@ -277,53 +336,48 @@ def _try_solve_at_layer(board: Board, layer: int) -> tuple[bool, list[str], list
             for subset in _choose_k(unsolved, k):
                 cols_used: set[int] = set()
                 for rid in subset:
-                    for _, c in _region_avail(rid):
+                    for _, c in self._region_avail(rid):
                         cols_used.add(c)
                 if len(cols_used) <= k:
                     changed = False
                     for rid in subset:
-                        for r, c in _region_avail(rid):
+                        for r, c in self._region_avail(rid):
                             if c not in cols_used:
-                                available[r][c] = False
+                                self.available[r][c] = False
                                 changed = True
                     for other_rid in unsolved:
                         if other_rid in subset:
                             continue
-                        for r, c in _region_avail(other_rid):
+                        for r, c in self._region_avail(other_rid):
                             if c in cols_used:
-                                available[r][c] = False
+                                self.available[r][c] = False
                                 changed = True
                     if changed:
-                        techniques.append("region_group_lock")
-                        path.append(f"Group lock: {len(subset)} regions in {len(cols_used)} cols")
+                        self._record_technique("region_group_lock")
+                        self.steps.append(
+                            f"Group lock: {len(subset)} regions in {len(cols_used)} cols"
+                        )
                         return True
 
         return False
 
-    # ---- technique: diagonal neighbor elimination (layer 4+) ----
-
-    def _try_diagonal_neighbor_elim() -> bool:
-        """Eliminate cells via diagonal neighbor analysis.
-
-        If every placement in a region touches the same outside cell
-        diagonally, that outside cell cannot hold a queen.
-        """
-        for rid in range(n):
-            if region_has[rid]:
+    def try_diagonal_elim(self) -> bool:
+        """Eliminate cells via diagonal neighbor analysis."""
+        for rid in range(self.n):
+            if self.region_has[rid]:
                 continue
-            cells = _region_avail(rid)
+            cells = self._region_avail(rid)
             if not cells or len(cells) > 3:
                 continue
 
-            # Collect all diagonal neighbours of every cell in this region
             common_diag: set[tuple[int, int]] | None = None
             for r, c in cells:
                 diag_neighbors: set[tuple[int, int]] = set()
-                for dr, dc in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+                for dr, dc in _DIAGONALS:
                     nr, nc = r + dr, c + dc
-                    if 0 <= nr < n and 0 <= nc < n:
-                        other_rid = int(regions[nr, nc])
-                        if other_rid != rid and available[nr][nc]:
+                    if 0 <= nr < self.n and 0 <= nc < self.n:
+                        other_rid = int(self.regions[nr, nc])
+                        if other_rid != rid and self.available[nr][nc]:
                             diag_neighbors.add((nr, nc))
                 if common_diag is None:
                     common_diag = diag_neighbors
@@ -333,123 +387,218 @@ def _try_solve_at_layer(board: Board, layer: int) -> tuple[bool, list[str], list
             if common_diag:
                 changed = False
                 for nr, nc in common_diag:
-                    if available[nr][nc]:
-                        available[nr][nc] = False
+                    if self.available[nr][nc]:
+                        self.available[nr][nc] = False
                         changed = True
                 if changed:
-                    techniques.append("diagonal_neighbor_elimination")
-                    path.append(f"Diagonal elimination from region {rid}")
+                    self._record_technique("diagonal_elimination")
+                    self.steps.append(f"Diagonal elimination from region {rid}")
                     return True
 
         return False
 
-    # ---- technique: test a queen (layer 5+) ----
+    def run_full_deduction(self) -> bool:
+        """Run all deduction techniques to a fixed point. Returns True if any queen was placed."""
+        start_count = self.queens_count
+        while True:
+            progress = False
+            while self.try_forced_singleton():
+                progress = True
+            if self.try_region_line_lock():
+                progress = True
+                continue
+            if self.try_region_group_lock():
+                progress = True
+                continue
+            if self.try_diagonal_elim():
+                progress = True
+                continue
+            if not progress:
+                break
+        return self.queens_count > start_count
 
-    def _try_test_queen() -> bool:
-        """For each region with 2 legal cells, test-placing a queen.
+    # ── hypothetical analysis ────────────────────────────────────
 
-        If the test forces any region to have 0 cells,
-        the tested cell is eliminated.
+    def run_hypotheticals(
+        self, max_depth: int, depth: int = 1
+    ) -> tuple[list[tuple[int, int]], int]:
+        """Try placing queens hypothetically.
+
+        Returns (list of cells proven impossible, number of hypotheses tested).
         """
-        for rid in range(n):
-            if region_has[rid]:
-                continue
-            cells = _region_avail(rid)
-            if len(cells) != 2:
-                continue
+        eliminated: list[tuple[int, int]] = []
+        tested = 0
+        processed: set[tuple[int, int]] = set()
 
-            for test_r, test_c in cells:
-                # Simulate placing a queen at (test_r, test_c)
-                saved = _snapshot()
-                _place_queen(test_r, test_c)
+        for rid in self._unsolved_regions():
+            for r, c in self._region_avail(rid):
+                if (r, c) in processed:
+                    continue
+                processed.add((r, c))
 
-                # Run forced deduction chain
-                while True:
-                    if _dead_region_exists():
-                        # Contradiction! The test queen kills a region.
-                        _restore(saved)
-                        # Eliminate this cell (it can't be a queen)
-                        available[test_r][test_c] = False
-                        techniques.append("test_a_queen")
-                        path.append(
-                            f"Test Queen at ({test_r},{test_c}) eliminated — creates dead region"
-                        )
-                        return True
-                    # Apply forced singletons to propagate
-                    progress = False
-                    while _try_forced_singleton():
-                        progress = True
-                    if layer >= 2:
-                        while _try_region_line_lock():
-                            progress = True
-                    if not progress:
-                        break
+                snap = self.snapshot()
+                self._place_queen(r, c)
+                tested += 1
 
-                _restore(saved)
+                # Run deduction within the hypothetical
+                self.run_full_deduction()
 
-        return False
+                if self._dead_region_exists():
+                    # Contradiction — this cell cannot hold a queen
+                    eliminated.append((r, c))
+                    self.restore(snap)
+                    continue
 
-    # ---- snapshot/restore for test-a-queen backtracking ----
+                if depth < max_depth and self.queens_count < self.n:
+                    # Try deeper hypotheticals within this hypothesis
+                    sub_eliminated, sub_tested = self.run_hypotheticals(max_depth, depth + 1)
+                    tested += sub_tested
+                    # If ALL remaining paths from deeper analysis lead to contradiction,
+                    # then this cell is impossible too
+                    if sub_eliminated:
+                        # Check if the deeper analysis proved contradiction
+                        # by seeing if any unsolved region is dead after applying eliminations
+                        restorable = self.snapshot()
+                        dead = False
+                        for sr, sc in sub_eliminated:
+                            self.available[sr][sc] = False
+                        if self._dead_region_exists():
+                            dead = True
+                        self.restore(restorable)
+                        if dead:
+                            eliminated.append((r, c))
 
-    def _snapshot() -> tuple:
-        return (
-            [row[:] for row in available],
-            list(queens),
-            list(row_has),
-            list(col_has),
-            list(region_has),
+                self.restore(snap)
+
+        return eliminated, tested
+
+
+class _Snapshot:
+    """Immutable snapshot of deduction state."""
+
+    __slots__ = ("available", "col_has", "queens", "region_has", "row_has")
+
+    def __init__(
+        self,
+        available: list[list[bool]],
+        queens: list[tuple[int, int]],
+        row_has: list[bool],
+        col_has: list[bool],
+        region_has: list[bool],
+    ) -> None:
+        self.available = available
+        self.queens = queens
+        self.row_has = row_has
+        self.col_has = col_has
+        self.region_has = region_has
+
+
+# ── Main analyzer ──────────────────────────────────────────────────────
+
+
+def exhaustive_analyze(board: Board, max_hypo_depth: int = 3) -> DifficultyReport:
+    """Analyze board difficulty by measuring deduction gap and hypothetical depth.
+
+    Phase 1: Run all deduction techniques (forced singleton, line lock, group lock,
+    diagonal elimination) to exhaustion. Record how many queens are placed.
+
+    Phase 2: For each remaining available cell, hypothetically place a queen and
+    run deduction within the hypothetical. If a contradiction is found, the cell
+    is eliminated. Re-run deduction with new eliminations.
+
+    Phase 3: If still unsolved, recurse into deeper hypothetical chains (hypothesis
+    within hypothesis) up to ``max_hypo_depth``.
+
+    The difficulty score combines: deduction gap, hypothetical depth needed,
+    and elimination yield (fraction of hypotheses that produce contradictions).
+
+    Args:
+        board: The board to analyze.
+        max_hypo_depth: Maximum nesting depth for hypothetical chains.
+
+    Returns:
+        DifficultyReport with continuous score and detailed metrics.
+    """
+    n = board.n
+    state = _DeductionState(n, board.regions)
+
+    # Phase 1: deduction to exhaustion
+    state.run_full_deduction()
+
+    if state.queens_count == n:
+        score = _compute_score(n, state.queens_count, 0, 0, 0, state.technique_counts)
+        return DifficultyReport(
+            score=score,
+            difficulty_class=_compute_class(score),
+            deduction_placed=n,
+            deduction_total=n,
+            max_hypo_depth=0,
+            hypotheses_tested=0,
+            cells_eliminated=0,
+            solved_by_deduction=True,
+            techniques_used=tuple(sorted(set(state.techniques))),
         )
 
-    def _restore(snap: tuple) -> None:
-        nonlocal available, queens, row_has, col_has, region_has
-        saved_avail, saved_queens, saved_rows, saved_cols, saved_regions = snap
-        available = saved_avail
-        queens.clear()
-        queens.extend(saved_queens)
-        for i in range(n):
-            row_has[i] = saved_rows[i]
-            col_has[i] = saved_cols[i]
-            region_has[i] = saved_regions[i]
+    # Phase 2-3: hypothetical analysis
+    total_tested = 0
+    total_eliminated = 0
+    effective_depth = 0
 
-    # ---- main deduction loop ----
+    for depth in range(1, max_hypo_depth + 1):
+        eliminated, tested = state.run_hypotheticals(max_depth=depth)
+        total_tested += tested
+        total_eliminated += len(eliminated)
 
-    while len(queens) < n:
-        progress = False
+        if eliminated:
+            effective_depth = depth
+            for r, c in eliminated:
+                state.available[r][c] = False
 
-        # Forced singletons (all layers)
-        while _try_forced_singleton():
-            if _dead_region_exists():
-                return False, techniques, path
-            progress = True
+        # Re-run deduction with any new eliminations
+        state.run_full_deduction()
 
-        if len(queens) == n:
+        if state.queens_count == n:
             break
 
-        # Region line lock (layer 2+)
-        if layer >= 2 and _try_region_line_lock():
-            progress = True
+        if not eliminated:
+            # No progress at this depth — try deeper
             continue
 
-        # Region group lock (layer 3+)
-        if layer >= 3 and _try_region_group_lock():
-            progress = True
-            continue
+    score = _compute_score(
+        n,
+        state.queens_count,
+        effective_depth,
+        total_tested,
+        total_eliminated,
+        state.technique_counts,
+    )
 
-        # Diagonal neighbour elimination (layer 4+)
-        if layer >= 4 and _try_diagonal_neighbor_elim():
-            progress = True
-            continue
+    return DifficultyReport(
+        score=round(score, 2),
+        difficulty_class=_compute_class(score),
+        deduction_placed=state.queens_count,
+        deduction_total=n,
+        max_hypo_depth=effective_depth,
+        hypotheses_tested=total_tested,
+        cells_eliminated=total_eliminated,
+        solved_by_deduction=False,
+        techniques_used=tuple(sorted(set(state.techniques))),
+    )
 
-        # Test a Queen (layer 5+)
-        if layer >= 5 and _try_test_queen():
-            progress = True
-            continue
 
-        if not progress:
-            break
+# ── Backwards compatibility ────────────────────────────────────────────
 
-    solved = len(queens) == n
-    return solved, techniques, path
+
+def layered_analyze(board: Board) -> DifficultyReport:
+    """Legacy wrapper — delegates to exhaustive_analyze.
+
+    Kept for backwards compatibility. The returned ``score`` is
+    now continuous (0–10+), not a discrete layer (0–5).
+    """
+    return exhaustive_analyze(board)
+
+
+# ── Helpers ────────────────────────────────────────────────────────────
 
 
 def _choose_k(items: list[int], k: int) -> list[list[int]]:
