@@ -83,7 +83,7 @@
 </div>
 
 <script>
-    window.__PUZZLE_HASH__ = '8AAAAAJAgJIAiJbYiJckkpe20tukk_ukk';
+    window.__PUZZLE_HASH__ = '6AAJCBLCSTCVbClrttrA';
 // ── Decode board from URL hash or embedded data ───────────────────────
 function getPuzzleHash() {
   // Allow embedding the hash directly in the HTML (for GitHub Pages)
@@ -269,13 +269,19 @@ function handlePointerStart(e, board) {
   const cell = getCellFromEvent(e);
   if (!cell) return;
 
+  const key = `${cell.row},${cell.col}`;
+  const autoX = computeAutoX(board, game.queens);
+  const isX = game.manualXs.has(key) || autoX.has(key);
+  const isQueen = game.queens.some(([qr, qc]) => qr === cell.row && qc === cell.col);
+
   dragState = {
     active: false,
     startRow: cell.row,
     startCol: cell.col,
     lastRow: cell.row,
     lastCol: cell.col,
-    touched: new Set([`${cell.row},${cell.col}`])
+    touched: new Set([key]),
+    mode: isX ? 'erase' : (isQueen ? 'none' : 'draw'),
   };
 }
 
@@ -292,7 +298,7 @@ function handlePointerMove(e, board) {
     dragState.active = true;
   }
 
-  if (!dragState.active) return;
+  if (!dragState.active || dragState.mode === 'none') return;
 
   // Mark all cells between last position and current (line interpolation)
   const r0 = dragState.lastRow, c0 = dragState.lastCol;
@@ -332,12 +338,15 @@ function applyDragMarks(board, ds) {
   const boardEl = document.getElementById('board');
   for (const key of ds.touched) {
     if (qSet.has(key)) continue;
-    game.manualXs.add(key);
-    // Lightweight DOM update — add x-mark directly without full re-render.
-    // Full re-render (innerHTML = '') on mobile cancels the touch sequence.
     const [rr, cc] = key.split(',').map(Number);
     const cell = boardEl.querySelector(`[data-row='${rr}'][data-col='${cc}']`);
-    if (cell) cell.classList.add('x-mark');
+    if (ds.mode === 'erase') {
+      game.manualXs.delete(key);
+      if (cell) cell.classList.remove('x-mark');
+    } else {
+      game.manualXs.add(key);
+      if (cell) cell.classList.add('x-mark');
+    }
   }
 }
 
