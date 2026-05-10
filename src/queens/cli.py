@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import socketserver
+import subprocess
 import threading
 import time
 import webbrowser
@@ -235,6 +237,12 @@ def share(
     full_url = f"http://localhost:{port}{puzzle_url}"
 
     typer.echo(f"\n  Puzzle URL: {full_url}\n")
+
+    # If GitHub Pages is set up, also print the public URL
+    pages_base = _github_pages_url()
+    if pages_base:
+        typer.echo(f"  Public:    {pages_base}#{encoded}\n")
+
     typer.echo(f"  Serving from: {serve_dir}")
     typer.echo("  Press Ctrl+C to stop the server.\n")
 
@@ -252,6 +260,13 @@ def share(
 
 @app.command()
 def pages(
+    deploy: Annotated[
+        bool,
+        typer.Option(
+            "--deploy",
+            help="Deploy play.html to docs/ for GitHub Pages (one-time setup)",
+        ),
+    ] = False,
     size: Annotated[int, typer.Option("--size", "-n", help="Board size (N×N)")] = 8,
     difficulty: Annotated[
         str | None,
@@ -262,18 +277,52 @@ def pages(
         ),
     ] = None,
     seed: Annotated[int | None, typer.Option("--seed", "-s")] = None,
-    open_browser: Annotated[
-        bool, typer.Option("--open/--no-open", help="Open the page in browser for preview")
-    ] = False,
+    algorithm: Annotated[
+        str,
+        typer.Option(
+            "--algorithm",
+            "-A",
+            help="Generation algorithm: bfs, nqueens-block, cpsat",
+        ),
+    ] = "bfs",
 ) -> None:
-    """Generate a puzzle page for GitHub Pages hosting.
+    """Generate a puzzle URL for GitHub Pages sharing.
 
-    Writes docs/index.html with the puzzle embedded. Commit and push
-    to serve it at https://<user>.github.io/<repo>/.
+    No per-board git commits needed — every URL encodes the board in
+    the fragment and renders dynamically in the browser.
 
-    Only one puzzle is hosted at a time — each run overwrites the
-    previous page.
+    One-time setup (run once per repo):
+
+        uv run queens pages --deploy
+
+    This deploys play.html to docs/. Commit, push, and enable GitHub
+    Pages in your repo settings. After that, every run of
+    ``queens pages`` outputs a URL like:
+
+        https://<user>.github.io/<repo>/#<encoded-board>
     """
+    # ── One-time deploy ────────────────────────────────────────────
+    if deploy:
+        serve_dir = Path(__file__).resolve().parent
+        play_html_path = serve_dir / "play.html"
+        if not play_html_path.exists():
+            typer.echo(f"Error: play.html not found at {serve_dir}", err=True)
+            raise typer.Exit(1)
+
+        docs_dir = Path.cwd() / "docs"
+        docs_dir.mkdir(exist_ok=True)
+        output_path = docs_dir / "index.html"
+        output_path.write_text(play_html_path.read_text())
+
+        typer.echo(f"\n  Deployed play.html → {output_path}")
+        typer.echo("\n  Next steps:")
+        typer.echo("    1. Enable GitHub Pages: repo Settings → Pages")
+        typer.echo('       Source: "Deploy from a branch", branch: main, folder: /docs')
+        typer.echo("    2. git add docs/ && git commit && git push")
+        typer.echo("\n  After that, every `queens pages` outputs a shareable URL.")
+        return
+
+    # ── Generate board and output URL ──────────────────────────────
     diff_map: dict[str, float] = {
         "trivial": 0.0,
         "easy": 1.0,
@@ -288,55 +337,75 @@ def pages(
         typer.echo(f"Invalid difficulty. Choose from: {valid}", err=True)
         raise typer.Exit(1)
 
-    region_func = _resolve_algorithm("bfs")
+    region_func = _resolve_algorithm(algorithm)
 
-    typer.echo(f"Generating {size}×{size} board...", err=True)
+    typer.echo(f"Generating {size}×{size} board ({algorithm})...", err=True)
     board = generate_board(
         size,
         target_difficulty=target,
         seed=seed,
         region_func=region_func,
-        harden_deduction=True,
+        harden_deduction=(algorithm == "bfs"),
     )
 
-    # Encode board as URL hash
     regions_list = board.regions.tolist()
     encoded = encode_board(size, regions_list)
 
-    # Read play.html template
-    serve_dir = Path(__file__).resolve().parent
-    play_html_path = serve_dir / "play.html"
-    if not play_html_path.exists():
-        typer.echo(f"Error: play.html not found at {serve_dir}", err=True)
-        raise typer.Exit(1)
+    base_url = _github_pages_url()
+    url = (
+        f"{base_url}#{encoded}"
+        if base_url
+        else f"https://<user>.github.io/<repo>/#{encoded}"
+    )
 
-    template = play_html_path.read_text()
+    report = exhaustive_analyze(board)
+    typer.echo("\n  Puzzle URL:")
+    typer.echo(f"  {url}")
+    typer.echo(
+        f"\n  Board: {size}×{size}  |  "
+        f"Difficulty: {report.score:.1f} ({report.difficulty_class})",
+    )
+    typer.echo("\n  Share this link — no git push needed.")
 
-    # Inject the puzzle hash before the closing </script> tag (the last one)
-    # Find the position of the main <script> block
-    inject_marker = "<script>"
-    script_start = template.index(inject_marker) + len(inject_marker)
-    hash_script = f"\n    window.__PUZZLE_HASH__ = '{encoded}';"
-    output_html = template[:script_start] + hash_script + template[script_start:]
 
-    # Write to docs/
-    docs_dir = Path.cwd() / "docs"
-    docs_dir.mkdir(exist_ok=True)
-    output_path = docs_dir / "index.html"
-    output_path.write_text(output_html)
+def _github_pages_url() -> str | None:
+    """Detect the GitHub Pages base URL from the git remote.
 
-    typer.echo(f"\n  Puzzle page written to: {output_path}")
-    typer.echo(f"  Board: {size}×{size}")
-    typer.echo(f"  Hash: {encoded}")
-    typer.echo("\n  To publish:")
-    typer.echo("    1. Enable GitHub Pages in repo Settings → Pages")
-    typer.echo('       Source: "Deploy from a branch", branch: main, folder: /docs')
-    typer.echo("    2. git add docs/ && git commit -m 'New puzzle' && git push")
-    typer.echo("\n  Your puzzle will be live at:")
-    typer.echo("    https://<your-username>.github.io/<repo>/")
+    Parses ``git remote get-url origin`` and produces a URL like
+    ``https://<user>.github.io/<repo>`` for project pages, or
+    ``https://<user>.github.io`` for user/org pages.
 
-    if open_browser:
-        webbrowser.open(f"file://{output_path}")
+    Returns None if detection fails (no git repo, no origin, etc.).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        remote = result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+    # Parse: git@github.com:user/repo.git  or  https://github.com/user/repo.git
+    match = re.match(
+        r"(?:git@github\.com:|https://github\.com/)([^/]+)/(.+?)(?:\.git)?$",
+        remote,
+    )
+    if not match:
+        return None
+
+    user, repo = match.group(1), match.group(2)
+
+    # User/org page: repo is <user>.github.io → https://<user>.github.io/
+    # Project page:                 → https://<user>.github.io/<repo>/
+    if repo == f"{user}.github.io":
+        return f"https://{user}.github.io"
+    return f"https://{user}.github.io/{repo}"
 
 
 def _resolve_algorithm(name: str) -> RegionBuilder:
