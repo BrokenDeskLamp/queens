@@ -1,4 +1,7 @@
-"""Tests for the board generator."""
+"""Tests for the board generator.
+
+See docs/algorithms/generation.md for the full pipeline walkthrough.
+"""
 
 from __future__ import annotations
 

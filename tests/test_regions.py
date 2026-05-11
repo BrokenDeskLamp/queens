@@ -1,4 +1,7 @@
-"""Tests for region building."""
+"""Tests for region building.
+
+See docs/algorithms/regions.md for comparison of the three builders.
+"""
 
 from __future__ import annotations
 

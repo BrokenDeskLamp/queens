@@ -1,4 +1,7 @@
-"""Tests for the constraint solver."""
+"""Tests for the constraint solver.
+
+See docs/algorithms/solver.md for the MRV algorithm explanation.
+"""
 
 from __future__ import annotations
 

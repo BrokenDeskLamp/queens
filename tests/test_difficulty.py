@@ -1,4 +1,7 @@
-"""Tests for difficulty analysis."""
+"""Tests for difficulty analysis.
+
+See docs/algorithms/difficulty.md for the scoring formula and techniques.
+"""
 
 from __future__ import annotations
 
