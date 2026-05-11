@@ -14,6 +14,21 @@ $ echo '{"n":5,"regions":[[0,0,1,1,1],[0,0,0,1,1],[2,0,0,1,1],[2,2,3,4,1],[2,2,3
 A board with connected regions and exactly one solution passes
 validation.
 
+## Round-trip: generated boards pass validation
+
+```bash
+$ uv run queens generate --size 5 --seed 42 --format json 2>/dev/null > /tmp/queens_gen.json && uv run queens validate /tmp/queens_gen.json
+# stdout: OK: board is valid
+```
+
+```bash
+$ uv run queens generate --size 8 --seed 123 --algorithm nqueens-block --format json 2>/dev/null > /tmp/queens_gen8.json && uv run queens validate /tmp/queens_gen8.json
+# stdout: OK: board is valid
+```
+
+Boards produced by the generator must pass validation. This
+holds for all algorithms and sizes.
+
 ## File not found
 
 ```bash
@@ -49,10 +64,13 @@ placements. Exactly one solution is required.
 ## No solutions
 
 ```bash
-$ uv run queens validate --help
-# stdout: validate
+$ echo '{"n":5,"regions":[[0,1,2,3,4],[0,0,0,0,0],[0,0,0,0,0],[0,0,0,0,0],[0,0,0,0,0]],"solution":[[0,0],[1,1],[2,2],[3,3],[4,4]]}' > /tmp/queens_unsolvable.json && uv run queens validate /tmp/queens_unsolvable.json
+# exit: 1
+# stderr: no solutions found
 ```
 
-The unsolvable-board edge case is covered by unit tests
-(``test_unsolvable_board_returns_zero_5``).  Constructing a
-small connected-but-unsolvable board by hand is non-trivial.
+Regions 1, 2, 3, and 4 each have exactly one cell, and all four
+cells are in row 0. But a row can only hold one queen — making
+the board structurally unsolvable. The validator reports "no
+solutions found" because all regions are connected but the
+solver finds zero valid placements.

@@ -15,6 +15,12 @@ Supported directives:
     # stdout!: text     — stdout must NOT contain ``text``
     # stderr: text      — stderr must contain ``text``
     # stderr!: text     — stderr must NOT contain ``text``
+    # stdout_eq: text   — stdout must equal ``text`` exactly
+    # stderr_eq: text   — stderr must equal ``text`` exactly
+
+Multiple ``stdout_eq`` / ``stderr_eq`` directives are joined with
+newlines to form the expected output. Both expected and actual are
+stripped of leading/trailing whitespace before comparison.
 
 All tests run from the project root so ``uv run queens`` resolves.
 """
@@ -49,6 +55,8 @@ def _parse_spec(md_file: Path) -> list[tuple[str, str, dict[str, object]]]:
             "stdout_not": [],
             "stderr_contains": [],
             "stderr_not": [],
+            "stdout_eq": [],
+            "stderr_eq": [],
         }
 
         for line in lines:
@@ -62,12 +70,18 @@ def _parse_spec(md_file: Path) -> list[tuple[str, str, dict[str, object]]]:
                 continue
 
             if stripped.startswith("# "):
-                directive = stripped[2:].strip()
+                directive = stripped[2:]
                 if ":" not in directive:
                     continue  # doc comment, skip
                 key, _, value = directive.partition(":")
                 key = key.strip()
-                value = value.strip()
+                if key in ("stdout_eq", "stderr_eq"):
+                    # For exact-match directives, take everything after
+                    # the first ": " literally (preserving leading/trailing
+                    # whitespace in the output).
+                    value = directive.partition(": ")[2]
+                else:
+                    value = value.strip()
                 if key == "exit":
                     assertions["exit"] = int(value)
                 elif key == "stdout":
@@ -78,6 +92,10 @@ def _parse_spec(md_file: Path) -> list[tuple[str, str, dict[str, object]]]:
                     assertions["stderr_contains"].append(value)
                 elif key == "stderr!":
                     assertions["stderr_not"].append(value)
+                elif key == "stdout_eq":
+                    assertions["stdout_eq"].append(value)
+                elif key == "stderr_eq":
+                    assertions["stderr_eq"].append(value)
                 # Unknown directives are silently ignored (future-proof)
 
         if command is not None:
@@ -128,6 +146,22 @@ def test_spec(test_id: str, command: str, assertions: dict[str, object]) -> None
         f"stdout:\n{stdout}\nstderr:\n{stderr}"
     )
 
+    # ── Stdout exact match ─────────────────────────────────────────
+    stdout_eq_lines: list[str] = assertions.get("stdout_eq", [])  # type: ignore[assignment]
+    if stdout_eq_lines:
+        # rstrip each line to ignore cosmetic trailing whitespace
+        expected_stdout = "\n".join(
+            line.rstrip() for line in stdout_eq_lines
+        ).strip()
+        actual_stdout = "\n".join(
+            line.rstrip() for line in stdout.split("\n")
+        ).strip()
+        assert actual_stdout == expected_stdout, (
+            f"Stdout mismatch.\n"
+            f"Expected:\n{expected_stdout!r}\n"
+            f"Actual:\n{actual_stdout!r}"
+        )
+
     # ── Stdout assertions ──────────────────────────────────────────
     for pattern in assertions["stdout_contains"]:  # type: ignore[union-attr]
         assert pattern in stdout, (
@@ -137,6 +171,16 @@ def test_spec(test_id: str, command: str, assertions: dict[str, object]) -> None
     for pattern in assertions["stdout_not"]:  # type: ignore[union-attr]
         assert pattern not in stdout, (
             f"Expected stdout to NOT contain: {pattern!r}\nstdout:\n{stdout}"
+        )
+
+    # ── Stderr exact match ─────────────────────────────────────────
+    stderr_eq_lines: list[str] = assertions.get("stderr_eq", [])  # type: ignore[assignment]
+    if stderr_eq_lines:
+        expected_stderr = "\n".join(stderr_eq_lines).strip()
+        assert stderr.strip() == expected_stderr, (
+            f"Stderr mismatch.\n"
+            f"Expected:\n{expected_stderr!r}\n"
+            f"Actual:\n{stderr.strip()!r}"
         )
 
     # ── Stderr assertions ──────────────────────────────────────────

@@ -59,3 +59,18 @@ $ uv run queens pages --size 5 --seed 1
 
 Difficulty is optional — omitting it generates a board of
 unconstrained difficulty.
+
+## Help output
+
+```bash
+$ uv run queens pages --help
+# stdout: --deploy
+# stdout: --size
+# stdout: --difficulty
+# stdout: --seed
+# stdout: --algorithm
+# stdout: --help
+```
+
+All flags are documented, including the one-time `--deploy` setup
+step.

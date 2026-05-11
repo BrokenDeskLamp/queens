@@ -22,6 +22,24 @@ $ uv run queens benchmark --size 5 --count 20
 
 5×5 boards generate quickly — 20 boards should all succeed.
 
+## Seed reproducibility
+
+```bash
+$ uv run queens benchmark --size 5 --count 3 --seed 42
+# stderr: Generated: 3/3
+```
+
+With a fixed seed, the benchmark produces identical progress
+output. The average time varies between runs but the success
+count and size are deterministic.
+
+```bash
+$ uv run queens benchmark --size 5 --count 3 --seed 42
+# stderr: Generated: 3/3
+```
+
+Running twice with the same seed gives identical output.
+
 ## Help output
 
 ```bash
